@@ -57,19 +57,22 @@ function Get-Token {
 # Invoke-WebRequest con un token y, si GitHub redirige al almacenamiento (artifacts, assets), segunda petición sin el
 # token: el blob storage rechaza peticiones con Authorization.
 function Download($url, $dest, $token) {
-    $h = @{ "User-Agent" = $UA["User-Agent"] }
-    if ($token) { $h["Authorization"] = "Bearer $token" }
-    $location = $null
-    try {
-        $r = Invoke-WebRequest -Uri $url -Headers $h -MaximumRedirection 0 -OutFile $dest -PassThru -UseBasicParsing -ErrorAction Stop
-        if ($r.StatusCode -ge 300 -and $r.StatusCode -lt 400) { $location = $r.Headers["Location"] }
-    } catch {
-        $resp = $_.Exception.Response
-        if ($resp -and [int]$resp.StatusCode -ge 300 -and [int]$resp.StatusCode -lt 400) {
-            $location = $resp.Headers["Location"]
-        } else { throw }
+    # HttpWebRequest sin seguir redirecciones: Invoke-WebRequest -MaximumRedirection 0 falla en PowerShell 5.1 sin
+    # devolver la respuesta, así que no se puede leer Location.
+    $req = [Net.HttpWebRequest]::Create($url)
+    $req.UserAgent = $UA["User-Agent"]
+    $req.AllowAutoRedirect = $false
+    if ($token) { $req.Headers["Authorization"] = "Bearer $token" }
+    $resp = $req.GetResponse()
+    $code = [int]$resp.StatusCode
+    if ($code -ge 300 -and $code -lt 400) {
+        $location = $resp.Headers["Location"]
+        $resp.Close()
+        Invoke-WebRequest -Uri $location -OutFile $dest -UseBasicParsing -Headers @{ "User-Agent" = $UA["User-Agent"] }
+    } else {
+        $fs = [IO.File]::Create($dest)
+        try { $resp.GetResponseStream().CopyTo($fs) } finally { $fs.Close(); $resp.Close() }
     }
-    if ($location) { Invoke-WebRequest -Uri $location -OutFile $dest -UseBasicParsing -Headers @{ "User-Agent" = $UA["User-Agent"] } }
 }
 
 function Api($path, $token) {
