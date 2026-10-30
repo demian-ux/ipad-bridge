@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><title>iPad Bridge</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>
+ html,body{margin:0;height:100%;background:#000;overflow:hidden;overscroll-behavior:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+ #c,#s{position:fixed;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
+ #s{background:transparent}
+ #pad{position:fixed;inset:0;touch-action:none}
+ #msg{position:fixed;left:0;right:0;top:40%;text-align:center;color:#999;font:20px system-ui;pointer-events:none}
+ #hud{position:fixed;top:8px;right:12px;color:#6f6;font:12px ui-monospace,monospace;opacity:.7;pointer-events:none}
+ /* Barra de teclas (estilo ExpressKeys): tira vertical en un borde, encima del área de dibujo */
+ #bar{position:fixed;top:50%;left:6px;transform:translateY(-50%);display:flex;flex-direction:column;gap:4px;padding:4px;
+      background:rgba(0,0,0,.45);border:1px solid rgba(255,255,255,.12);border-radius:14px;touch-action:none;z-index:5}
+ #bar.right,#tab.right{left:auto;right:6px}
+ #bar button{width:44px;height:44px;margin:0;padding:0;border:0;border-radius:9px;background:rgba(255,255,255,.1);color:rgba(255,255,255,.9);
+      font:600 17px/1 system-ui;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;touch-action:none;-webkit-tap-highlight-color:transparent}
+ #bar button small{font-size:8px;font-weight:500;opacity:.7;white-space:nowrap}
+ #bar button.pressed{opacity:.5;transform:scale(.94)}
+ #bar button.on{background:rgba(255,220,0,.9);color:#000}
+ #bar .grip{height:24px;background:transparent;color:rgba(255,255,255,.5);font-size:13px}
+ #bar hr{width:32px;border:0;border-top:1px solid rgba(255,255,255,.15);margin:1px auto}
+ #tab{position:fixed;top:50%;left:6px;transform:translateY(-50%);width:18px;height:56px;padding:0;border:0;border-radius:9px;
+      background:rgba(0,0,0,.4);color:rgba(255,255,255,.6);font:700 14px system-ui;touch-action:none;z-index:5;-webkit-tap-highlight-color:transparent}
+</style></head><body>
+<canvas id="c"></canvas>
+<canvas id="s" hidden></canvas>
+<div id="pad"></div>
+<div id="msg">Conectando con la PC…</div>
+<div id="hud"></div>
+<div id="bar">
+ <button class="grip" data-grip title="toque largo: cambiar de lado">≡</button>
+ <button data-mod="shift">⇧<small>shift</small></button>
+ <button data-mod="ctrl">⌃<small>ctrl</small></button>
+ <button data-mod="alt">⌥<small>alt</small></button>
+ <button data-mod="space">␣<small>esp</small></button>
+ <hr>
+ <button data-key="ctrl+z">↶<small>deshacer</small></button>
+ <button data-key="ctrl+shift+z">↷<small>rehacer</small></button>
+ <button data-key="[">[<small>pincel −</small></button>
+ <button data-key="]">]<small>pincel +</small></button>
+ <button data-key="b">B<small>pincel</small></button>
+ <button data-key="e">E<small>goma</small></button>
+ <hr>
+ <button data-hide>✕<small>ocultar</small></button>
+</div>
+<button id="tab" hidden>›</button>
+<script>
+const c=document.getElementById('c'), ctx=c.getContext('2d',{alpha:false,desynchronized:true});
+const pad=document.getElementById('pad'), msg=document.getElementById('msg'), hud=document.getElementById('hud');
+let ws, vw=0, vh=0, decoder=null, waitingKey=true, dec={frames:0,t:performance.now()}, penHud='';
+
+function connectWS(){
+  ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws');
+  ws.binaryType='arraybuffer';
+  ws.onopen=()=>{ws.send(JSON.stringify({type:'hello',role:'ipad'}));msg.textContent='Esperando que la PC comparta pantalla…';};
+  ws.onclose=()=>{msg.textContent='Sin conexión con la PC, reintentando…';setTimeout(connectWS,1500);};
+  ws.onmessage=async e=>{
+    if(e.data instanceof ArrayBuffer){
+      if(new Uint8Array(e.data,0,1)[0]===2)showStill(e.data.slice(1));else onVideoChunk(e.data);
+      return;}
+    const m=JSON.parse(e.data);
+    if(m.type==='vconfig')await setupDecoder(m);
+    if(m.type==='still-clear'){stillSeq++;sc.hidden=true;}
+  };
+}
+
+// ---- Imagen fija sin pérdida (PNG) cuando la pantalla está quieta ----
+const sc=document.getElementById('s'), sctx=sc.getContext('2d');
+let stillSeq=0;
+async function showStill(buf){
+  const seq=++stillSeq;
+  try{
+    const bmp=await createImageBitmap(new Blob([buf],{type:'image/png'}));
+    if(seq!==stillSeq){bmp.close();return;}   // llegó un still-clear mientras decodificaba
+    if(sc.width!==bmp.width||sc.height!==bmp.height){sc.width=bmp.width;sc.height=bmp.height;}
+    sctx.drawImage(bmp,0,0);bmp.close();sc.hidden=false;
+  }catch(e){}
+}
+
+// ---- Video: HEVC 10 bits por WebSocket, decode por hardware, sin buffer de jitter ----
+function b64dec(s){const b=atob(s);const u=new Uint8Array(b.length);for(let i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u;}
+async function setupDecoder(m){
+  if(!('VideoDecoder' in window)){
+    msg.innerHTML=location.protocol==='http:'
+      ?'Esta página necesita https.<br>Abrí <a style="color:#6af" href="http://'+location.hostname+'/">la guía de instalación</a>.'
+      :'Este Safari no tiene WebCodecs (necesita iPadOS 16.4 o más nuevo).';
+    msg.style.pointerEvents='auto';return;}
+  if(decoder){try{decoder.close();}catch(e){}}
+  const cfg={codec:m.codec,optimizeForLatency:true};
+  if(m.description)cfg.description=b64dec(m.description);
+  const sup=await VideoDecoder.isConfigSupported(cfg);
+  if(!sup.supported){msg.textContent='Safari no decodifica '+m.codec;return;}
+  vw=m.width;vh=m.height;c.width=vw;c.height=vh;
+  decoder=new VideoDecoder({
+    output:frame=>{ctx.drawImage(frame,0,0,c.width,c.height);frame.close();dec.frames++;msg.textContent='';},
+    error:e=>{msg.textContent='decoder: '+e.message;waitingKey=true;ws.send(JSON.stringify({type:'need-key'}));}
+  });
+  decoder.configure(cfg);
+  waitingKey=true;ws.send(JSON.stringify({type:'need-key'}));
+}
+function onVideoChunk(buf){
+  if(!decoder||decoder.state!=='configured')return;
+  const dv=new DataView(buf);const key=dv.getUint8(0)===1, ts=dv.getFloat64(1);
+  if(waitingKey){if(!key)return;waitingKey=false;}
+  if(decoder.decodeQueueSize>6){waitingKey=true;ws.send(JSON.stringify({type:'need-key'}));return;}
+  try{decoder.decode(new EncodedVideoChunk({type:key?'key':'delta',timestamp:ts,data:new Uint8Array(buf,9)}));}
+  catch(e){waitingKey=true;ws.send(JSON.stringify({type:'need-key'}));}
+}
+setInterval(()=>{const dt=(performance.now()-dec.t)/1000;if(decoder)hud.textContent=Math.round(dec.frames/dt)+' fps · cola '+decoder.decodeQueueSize+(penHud?' · '+penHud:'');dec={frames:0,t:performance.now()};},1000);
+
+// ---- Input: Pencil = lápiz de Windows con presión, inclinación y hover. Un dedo = mover cursor (tap = click).
+// ---- Dos dedos = scroll. Mientras el Pencil toca, los dedos se ignoran (palma). ----
+function norm(cx,cy){
+  const W=innerWidth,H=innerHeight;
+  if(!vw||!vh)return [cx/W,cy/H];
+  const s=Math.min(W/vw,H/vh), dw=vw*s, dh=vh*s, ox=(W-dw)/2, oy=(H-dh)/2;
+  return [Math.min(1,Math.max(0,(cx-ox)/dw)), Math.min(1,Math.max(0,(cy-oy)/dh))];
+}
+const send=o=>{if(ws&&ws.readyState===1)ws.send(JSON.stringify(Object.assign({type:'input'},o)));};
+let pendingMove=null, raf=0, touches=new Map(), lastScrollY=null, lastScrollX=null, tapStart=null, penDown=false;
+function flush(){raf=0;if(pendingMove){send(pendingMove);pendingMove=null;}}
+function queueMove(x,y){pendingMove={ev:'move',x:x,y:y};if(!raf)raf=requestAnimationFrame(flush);}
+const tilt=e=>[Math.round(e.tiltX||0),Math.round(e.tiltY||0)];
+
+pad.addEventListener('pointerdown',function(e){
+  pad.setPointerCapture(e.pointerId);
+  const n=norm(e.clientX,e.clientY), x=n[0], y=n[1];
+  if(e.pointerType==='pen'){
+    const t=tilt(e);penDown=true;
+    send({ev:'down',pen:1,x:x,y:y,p:e.pressure,tx:t[0],ty:t[1],btn:(e.buttons&2)?2:0});penHud='pen '+e.pressure.toFixed(2);return;}
+  if(penDown)return;                       // palma o dedo mientras se dibuja
+  touches.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  if(touches.size===1){tapStart={t:performance.now(),x:e.clientX,y:e.clientY};queueMove(x,y);}
+  if(touches.size===2){lastScrollY=null;tapStart=null;}
+});
+pad.addEventListener('pointermove',function(e){
+  const n=norm(e.clientX,e.clientY), x=n[0], y=n[1];
+  if(e.pointerType==='pen'){
+    if(e.buttons&1){
+      // Trayectoria completa: todos los eventos coalescidos del frame, no solo el último.
+      const evs=(e.getCoalescedEvents&&e.getCoalescedEvents())||[];
+      const pts=(evs.length?evs:[e]).map(c=>{const m=norm(c.clientX,c.clientY),t=tilt(c);return [m[0],m[1],c.pressure,t[0],t[1]];});
+      send({ev:'moves',pen:1,pts:pts});penHud='pen '+e.pressure.toFixed(2);
+    }else{const t=tilt(e);send({ev:'hover',pen:1,x:x,y:y,tx:t[0],ty:t[1]});penHud='hover';}
+    return;}
+  if(!touches.has(e.pointerId))return;
+  touches.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  if(touches.size===1){queueMove(x,y);}
+  else if(touches.size===2){
+    const pts=Array.from(touches.values());const cy=(pts[0].y+pts[1].y)/2, cx=(pts[0].x+pts[1].x)/2;
+    if(lastScrollY!==null){const dy=cy-lastScrollY, dx=cx-lastScrollX;if(Math.abs(dy)>2||Math.abs(dx)>2)send({ev:'scroll',dy:Math.round(dy*3),dx:Math.round(-dx*3)});}
+    lastScrollY=cy;lastScrollX=cx;
+  }
+});
+function endPointer(e){
+  const n=norm(e.clientX,e.clientY), x=n[0], y=n[1];
+  if(e.pointerType==='pen'){penDown=false;send({ev:'up',pen:1,x:x,y:y});penHud='';return;}
+  touches.delete(e.pointerId);
+  if(tapStart&&touches.size===0){
+    const dt=performance.now()-tapStart.t, d=Math.hypot(e.clientX-tapStart.x,e.clientY-tapStart.y);
+    if(dt<250&&d<12){flush();send({ev:'down',x:x,y:y,btn:0});send({ev:'up',x:x,y:y,btn:0});}
+    tapStart=null;
+  }
+  if(touches.size<2)lastScrollY=null;
+}
+pad.addEventListener('pointerup',endPointer);pad.addEventListener('pointercancel',endPointer);
+// El Pencil se alejó de la pantalla (o terminó el trazo en iPads sin hover): Windows vuelve al cursor normal.
+pad.addEventListener('pointerleave',function(e){if(e.pointerType==='pen'&&!penDown){send({ev:'leave',pen:1});penHud='';}});
+pad.addEventListener('contextmenu',function(e){e.preventDefault();});
+document.addEventListener('gesturestart',function(e){e.preventDefault();});
+document.addEventListener('dblclick',function(e){e.preventDefault();});
+
+// ---- Barra de teclas (estilo ExpressKeys). Está encima de #pad, así que sus toques no llegan a la lógica de
+// ---- dedos/palma: un dedo mantiene Shift/Ctrl/Alt/Espacio mientras el Pencil dibuja. Los modificadores mandan
+// ---- {ev:'mod',key,down:true} al apoyar y down:false al soltar; las pulsaciones {ev:'key',keys:'ctrl+z'} al apoyar. ----
+const bar=document.getElementById('bar'), tab=document.getElementById('tab');
+const held=new Map();   // pointerId -> modificador mantenido (se pueden mantener dos a la vez)
+let gripTimer=0;
+function setSide(r){bar.classList.toggle('right',r);tab.classList.toggle('right',r);tab.textContent=r?'‹':'›';try{localStorage.keyBarRight=r?'1':'';}catch(e){}}
+try{setSide(!!localStorage.keyBarRight);}catch(e){}
+function releaseHeld(){held.forEach(mod=>send({ev:'mod',key:mod,down:false}));held.clear();bar.querySelectorAll('.on,.pressed').forEach(b=>b.classList.remove('on','pressed'));}
+bar.addEventListener('pointerdown',function(e){
+  const b=e.target.closest('button');if(!b)return;
+  e.preventDefault();e.stopPropagation();try{b.setPointerCapture(e.pointerId);}catch(err){}b.classList.add('pressed');
+  if(b.dataset.mod!==undefined){held.set(e.pointerId,b.dataset.mod);b.classList.add('on');send({ev:'mod',key:b.dataset.mod,down:true});}
+  else if(b.dataset.key!==undefined)send({ev:'key',keys:b.dataset.key});
+  else if(b.dataset.grip!==undefined)gripTimer=setTimeout(function(){gripTimer=0;setSide(!bar.classList.contains('right'));},500);
+  else if(b.dataset.hide!==undefined){releaseHeld();bar.hidden=true;tab.hidden=false;}
+});
+function barUp(e){
+  const b=e.target.closest('button');if(b)b.classList.remove('pressed');
+  if(gripTimer){clearTimeout(gripTimer);gripTimer=0;}
+  const mod=held.get(e.pointerId);
+  if(mod!==undefined){held.delete(e.pointerId);if(b)b.classList.remove('on');send({ev:'mod',key:mod,down:false});}
+}
+bar.addEventListener('pointerup',barUp);bar.addEventListener('pointercancel',barUp);
+bar.addEventListener('contextmenu',function(e){e.preventDefault();});
+tab.addEventListener('pointerdown',function(e){e.preventDefault();bar.hidden=false;tab.hidden=true;});
+window.addEventListener('blur',releaseHeld);   // al salir de Safari no dejar un modificador pegado
+connectWS();
+</script></body></html>

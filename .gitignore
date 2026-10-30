@@ -1,0 +1,14 @@
+# claves privadas y certificados emitidos para esta PC (make_certs.py los regenera)
+ipad-bridge/certs/*.key
+ipad-bridge/certs/*.csr
+ipad-bridge/certs/*.srl
+ipad-bridge/certs/server.crt
+# logs y caches
+*.log
+*.err
+__pycache__/
+*.pyc
+# paquete distribuible generado
+/ipad-bridge.zip
+# configuración local de Claude
+.claude/settings.local.json

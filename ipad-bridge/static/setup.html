@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><title>iPad Bridge · instalación</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+ body{font:18px/1.5 system-ui;margin:0;background:#111;color:#eee;padding:32px;max-width:640px}
+ a.btn{display:inline-block;padding:14px 22px;border-radius:10px;background:#2d6cdf;color:#fff;text-decoration:none;font-weight:600;margin:8px 0}
+ ol li{margin:10px 0} code{background:#222;padding:2px 6px;border-radius:4px}
+ .note{color:#aaa;font-size:15px}
+</style></head><body>
+<h2>iPad Bridge · primera vez en este iPad</h2>
+<p>El modo de baja latencia necesita https. Instalá una sola vez el certificado de la PC:</p>
+<ol>
+  <li><a class="btn" href="/ca.crt">Descargar certificado</a><br><span class="note">Safari pregunta "¿Permitir descargar perfil?" → Permitir.</span></li>
+  <li>Abrí <b>Ajustes</b>. Arriba aparece <b>"Perfil descargado"</b> → tocalo → <b>Instalar</b> (pide el código del iPad).</li>
+  <li>En Ajustes → <b>General → Información → Ajustes de confianza de certificados</b>, activá <b>iPad Bridge CA</b>.</li>
+  <li>Volvé a Safari y abrí: <a class="btn" href="{{HTTPS}}/ipad.html">{{HTTPS}}/ipad.html</a></li>
+</ol>
+<p><button class="btn" style="border:0;font:inherit" onclick="testTLS()">Probar https</button> <span id="tls" class="note"></span></p>
+<script>
+async function testTLS(){const el=document.getElementById('tls');el.textContent='probando…';const t0=performance.now();
+  try{const r=await fetch('{{HTTPS}}/ping',{cache:'no-store'});const j=await r.json();
+    el.textContent='OK: https responde ('+Math.round(performance.now()-t0)+' ms). Abrí el botón del paso 4.';el.style.color='#6f6';}
+  catch(e){el.textContent='FALLÓ: '+e.name+' · '+e.message+' · '+Math.round(performance.now()-t0)+' ms';el.style.color='#f66';}}
+</script>
+<p class="note">Si Safari igual avisa que la conexión no es privada, el paso 3 quedó sin activar. Si querés usarlo a pantalla completa, agregá la dirección https a la pantalla de inicio desde el menú Compartir.</p>
+<h3>App nativa (opcional, para cable)</h3>
+<p><a class="btn" href="/iPadBridge.swiftpm.zip">Descargar iPadBridge.swiftpm.zip</a><br>
+<span class="note">Descomprimilo en Archivos y abrí la carpeta <code>iPadBridge.swiftpm</code> con Swift Playgrounds.</span></p>
+<p class="note">Sin certificado podés seguir usando <a href="{{HTTP}}/ipad.html">la versión http</a> con el motor WebRTC (más latencia).</p>
+</body></html>
