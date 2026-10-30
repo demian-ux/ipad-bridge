@@ -7,6 +7,8 @@
  html,body{margin:0;height:100%;background:#000;overflow:hidden;overscroll-behavior:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
  #c,#s{position:fixed;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
  #s{background:transparent}
+ /* Previsualización local del trazo: canvas transparente encima del video, debajo de la barra */
+ #ov{position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:2}
  #pad{position:fixed;inset:0;touch-action:none}
  #msg{position:fixed;left:0;right:0;top:40%;text-align:center;color:#999;font:20px system-ui;pointer-events:none}
  #hud{position:fixed;top:8px;right:12px;color:#6f6;font:12px ui-monospace,monospace;opacity:.7;pointer-events:auto;touch-action:none;
@@ -18,36 +20,80 @@
  #bar.right,#tab.right{left:auto;right:6px}
  #bar button{width:44px;height:44px;margin:0;padding:0;border:0;border-radius:9px;background:rgba(255,255,255,.1);color:rgba(255,255,255,.9);
       font:600 17px/1 system-ui;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;touch-action:none;-webkit-tap-highlight-color:transparent}
- #bar button small{font-size:8px;font-weight:500;opacity:.7;white-space:nowrap}
+ #bar button small{font-size:8px;font-weight:500;opacity:.7;white-space:nowrap;max-width:42px;overflow:hidden;text-overflow:ellipsis}
  #bar button.pressed{opacity:.5;transform:scale(.94)}
  #bar button.on{background:rgba(255,220,0,.9);color:#000}
  #bar .grip{height:24px;background:transparent;color:rgba(255,255,255,.5);font-size:13px}
+ #bar .prof{height:22px;background:rgba(120,180,255,.25);color:#cde;font:700 11px system-ui;letter-spacing:.5px}
  #bar hr{width:32px;border:0;border-top:1px solid rgba(255,255,255,.15);margin:1px auto}
  #tab{position:fixed;top:50%;left:6px;transform:translateY(-50%);width:18px;height:56px;padding:0;border:0;border-radius:9px;
       background:rgba(0,0,0,.4);color:rgba(255,255,255,.6);font:700 14px system-ui;touch-action:none;z-index:5;-webkit-tap-highlight-color:transparent}
+ /* Panel de presión, previsualización y gestos (botón ⚙ de la barra) */
+ #cfg{position:fixed;top:50%;left:64px;transform:translateY(-50%);width:270px;max-height:92vh;overflow:auto;padding:12px 14px;box-sizing:border-box;
+      background:rgba(20,20,24,.92);border:1px solid rgba(255,255,255,.15);border-radius:14px;color:#ddd;font:13px system-ui;z-index:6;-webkit-user-select:none}
+ #cfg.right{left:auto;right:64px}
+ #cfg h3{margin:10px 0 6px;font:700 11px system-ui;letter-spacing:1px;text-transform:uppercase;color:#9ab}
+ #cfg h3:first-child{margin-top:0}
+ #cfg label{display:flex;align-items:center;gap:8px;margin:5px 0}
+ #cfg label span{width:78px;flex:none;color:#bbb}
+ #cfg label output{width:40px;flex:none;text-align:right;font:12px ui-monospace,monospace;color:#fff}
+ #cfg input[type=range]{flex:1;min-width:0}
+ #cfg input[type=color]{width:34px;height:24px;border:0;background:none;padding:0}
+ #cfg .presets{display:flex;gap:6px;margin:4px 0 8px}
+ #cfg .presets button,#cfg button.act{flex:1;padding:6px 0;border:1px solid rgba(255,255,255,.2);border-radius:8px;background:rgba(255,255,255,.08);color:#eee;font:600 12px system-ui}
+ #cfg .presets button.on{background:rgba(255,220,0,.9);color:#000;border-color:transparent}
+ #cfg .meter{position:relative;height:10px;border-radius:5px;background:rgba(255,255,255,.1);overflow:hidden;flex:1}
+ #cfg .meter i{position:absolute;left:0;top:0;bottom:0;width:0;background:#6f6}
+ #cfg .meter i.raw{background:#6af;height:4px}
+ #cfg canvas{display:block;width:100px;height:100px;background:rgba(255,255,255,.05);border-radius:8px;flex:none}
+ #cfg .row{display:flex;gap:10px;align-items:flex-start}
+ #cfg .row .col{flex:1;min-width:0}
+ #cfg p{margin:4px 0;color:#999;font-size:11px;line-height:1.35}
+ /* Campo oculto que recibe el teclado en pantalla y el teclado físico del iPad */
+ #kb{position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;border:0;padding:0;font-size:16px}
+ #kbhint{position:fixed;left:50%;bottom:10px;transform:translateX(-50%);padding:5px 12px;border-radius:12px;background:rgba(255,220,0,.85);color:#000;font:600 12px system-ui;z-index:5;pointer-events:none}
 </style></head><body>
 <canvas id="c"></canvas>
 <canvas id="s" hidden></canvas>
+<canvas id="ov"></canvas>
 <div id="pad"></div>
 <div id="msg">Conectando con la PC…</div>
 <div id="hud"></div>
 <div id="bar">
  <button class="grip" data-grip title="toque largo: cambiar de lado">≡</button>
- <button data-mod="shift">⇧<small>shift</small></button>
- <button data-mod="ctrl">⌃<small>ctrl</small></button>
- <button data-mod="alt">⌥<small>alt</small></button>
- <button data-mod="space">␣<small>esp</small></button>
+ <button class="prof" data-prof title="perfil de la barra (toque: cambiar a mano)">···</button>
+ <div id="keys" style="display:contents"></div>
  <hr>
- <button data-key="ctrl+z">↶<small>deshacer</small></button>
- <button data-key="ctrl+shift+z">↷<small>rehacer</small></button>
- <button data-key="[">[<small>pincel −</small></button>
- <button data-key="]">]<small>pincel +</small></button>
- <button data-key="b">B<small>pincel</small></button>
- <button data-key="e">E<small>goma</small></button>
- <hr>
+ <button data-kbd>⌨<small>teclado</small></button>
+ <button data-cfg>⚙<small>ajustes</small></button>
  <button data-hide>✕<small>ocultar</small></button>
 </div>
 <button id="tab" hidden>›</button>
+<input id="kb" type="text" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" aria-label="teclado hacia la PC">
+<div id="kbhint" hidden>teclado → PC · tocá ⌨ para cerrar</div>
+<div id="cfg" hidden>
+ <h3>Presión del Pencil</h3>
+ <div class="presets"><button data-preset="0.6">Suave</button><button data-preset="1">Lineal</button><button data-preset="1.6">Firme</button></div>
+ <label><span>Gamma</span><input type="range" id="gamma" min="0.3" max="2.5" step="0.05"><output id="gammaV"></output></label>
+ <label><span>Mínimo</span><input type="range" id="pmin" min="0" max="0.25" step="0.005"><output id="pminV"></output></label>
+ <label><span>Suavizado</span><input type="range" id="smooth" min="0" max="1" step="0.05"><output id="smoothV"></output></label>
+ <div class="row"><canvas id="curve" width="200" height="200"></canvas>
+  <div class="col"><label><span>iPad</span><div class="meter"><i id="mRaw"></i></div><output id="mRawV">0.00</output></label>
+   <label><span>a Windows</span><div class="meter"><i id="mOut"></i></div><output id="mOutV">0.00</output></label>
+   <p>Dibujá con el Pencil para ver la presión en vivo. Menos de 1 = responde con poca fuerza; más de 1 = pide apretar.</p></div></div>
+ <h3>Previsualización del trazo</h3>
+ <label><span>Activa</span><input type="checkbox" id="pvOn"><span style="width:auto;color:#999">línea fina hasta que llega el video</span></label>
+ <label><span>Color</span><input type="color" id="pvColor"><span style="width:auto">Grosor</span><input type="range" id="pvWidth" min="0.5" max="4" step="0.25"><output id="pvWidthV"></output></label>
+ <label><span>Duración</span><input type="range" id="pvMs" min="20" max="200" step="5"><output id="pvMsV"></output></label>
+ <h3>Gestos de dedos</h3>
+ <label><span>Activos</span><input type="checkbox" id="gOn"><span style="width:auto;color:#999" id="gDesc"></span></label>
+ <label><span>Radio palma</span><input type="range" id="palmR" min="0" max="400" step="10"><output id="palmRV"></output></label>
+ <p>Los dedos a menos de ese radio de donde cae el Pencil se toman como palma. 0 = no distinguir.</p>
+ <h3>Barra</h3>
+ <label><span>App activa</span><output id="appV" style="width:auto;text-align:left">—</output></label>
+ <label><span>Perfil</span><button class="act" data-nextprof>siguiente</button><button class="act" data-autoprof>automático</button></label>
+ <p>Los perfiles y los gestos se editan en <b>static/shortcuts.json</b> (recargá la página después).</p>
+</div>
 <script>
 const c=document.getElementById('c'), ctx=c.getContext('2d',{alpha:false,desynchronized:true});
 const pad=document.getElementById('pad'), msg=document.getElementById('msg'), hud=document.getElementById('hud');
@@ -89,7 +135,7 @@ function connectWS(){
   ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws');
   ws.binaryType='arraybuffer';
   ws.onopen=()=>{ws.send(JSON.stringify({type:'hello',role:'ipad'}));msg.textContent='Esperando que la PC comparta pantalla…';
-    sendQuality();
+    sendQuality();sendPenCfg();
     clock.samples=[];clock.offset=null;sendPing();clearInterval(pingTimer);pingTimer=setInterval(sendPing,2000);
     clearInterval(statsTimer);statsTimer=setInterval(sendStats,5000);};
   ws.onclose=()=>{msg.textContent='Sin conexión con la PC, reintentando…';clearInterval(pingTimer);clearInterval(statsTimer);setTimeout(connectWS,1500);};
@@ -101,6 +147,7 @@ function connectWS(){
     if(m.type==='vconfig')await setupDecoder(m);
     if(m.type==='still-clear'){stillSeq++;sc.hidden=true;}
     if(m.type==='pong')onPong(m);
+    if(m.type==='app')onApp(m);
   };
 }
 
@@ -193,8 +240,47 @@ function sendStats(){
     pres50:n(p(meas.pres,.5)),pres95:n(p(meas.pres,.95)),rtt:n(clock.rtt),q:decoder.decodeQueueSize,drops:meas.drops,transport:location.protocol==='https:'?'wss':'ws',mode:qmode}));
 }
 
-// ---- Input: Pencil = lápiz de Windows con presión, inclinación y hover. Un dedo = mover cursor (tap = click).
-// ---- Dos dedos = scroll. Mientras el Pencil toca, los dedos se ignoran (palma). ----
+// ---- Configuración: barra y gestos desde shortcuts.json; presión y previsualización en localStorage ----
+// Mínimo embebido por si shortcuts.json no carga (servidor viejo): la barra de siempre y los gestos de Astropad.
+const FALLBACK={gestures:{tapMs:250,doubleMs:300,tapPx:10,palmRadius:180,palmSize:45,
+  tap1:{type:'click',btn:0},tap2:{type:'key',keys:'ctrl+z'},tap3:{type:'key',keys:'ctrl+y'},
+  hold1:{type:'toggle',keys:['e','b']},hold2:{type:'mouse',btn:1},hold3:{type:'mouse',btn:2}},
+  profiles:[{id:'generic',name:'Genérico',short:'···',match:[],buttons:[
+   {type:'mod',key:'shift',label:'⇧',caption:'shift'},{type:'mod',key:'ctrl',label:'⌃',caption:'ctrl'},
+   {type:'mod',key:'alt',label:'⌥',caption:'alt'},{type:'mod',key:'space',label:'␣',caption:'esp'},{type:'sep'},
+   {type:'key',keys:'ctrl+z',label:'↶',caption:'deshacer'},{type:'key',keys:'ctrl+shift+z',label:'↷',caption:'rehacer'},
+   {type:'key',keys:'[',label:'[',caption:'pincel −'},{type:'key',keys:']',label:']',caption:'pincel +'},
+   {type:'key',keys:'b',label:'B',caption:'pincel'},{type:'key',keys:'e',label:'E',caption:'goma'}]}]};
+let shortcuts=FALLBACK, profile=FALLBACK.profiles[0], manualProfile=false, appExe='';
+const pencfg=Object.assign({gamma:0.8,min:0.02,smooth:0,preview:true,pvColor:'#ff3b30',pvWidth:1.5,pvMs:70,gestures:true,palmRadius:null},
+  (()=>{try{return JSON.parse(localStorage.pencfg||'{}');}catch(e){return {};}})());
+function savePenCfg(){try{localStorage.pencfg=JSON.stringify(pencfg);}catch(e){}}
+let penCfgTimer=0;
+function sendPenCfg(){   // al conectar y al mover un control: el servidor lo aplica sin reiniciar
+  clearTimeout(penCfgTimer);
+  penCfgTimer=setTimeout(()=>send({ev:'pencfg',pen:1,gamma:pencfg.gamma,min:pencfg.min,smooth:pencfg.smooth}),80);
+}
+function gestures(){   // gestos generales + los del perfil, con el radio de palma del panel si se tocó
+  const g=Object.assign({},FALLBACK.gestures,shortcuts.gestures||{},profile.gestures||{});
+  if(pencfg.palmRadius!=null)g.palmRadius=pencfg.palmRadius;
+  return g;
+}
+fetch('shortcuts.json',{cache:'no-cache'}).then(r=>r.ok?r.json():null).then(j=>{
+  if(j&&Array.isArray(j.profiles)&&j.profiles.length){shortcuts=j;profile=j.profiles[0];}
+  pickProfile();
+}).catch(()=>{pickProfile();});
+function pickProfile(){
+  if(!manualProfile){
+    const exe=appExe.toLowerCase();
+    profile=shortcuts.profiles.find(p=>(p.match||[]).some(m=>m.toLowerCase()===exe))||shortcuts.profiles[0];
+  }
+  buildBar();updateCfgPanel();
+}
+function onApp(m){appExe=m.exe||'';manualProfile=false;pickProfile();}
+
+// ---- Input: Pencil = lápiz de Windows con presión, inclinación y hover. Dedos: un dedo mueve el cursor
+// ---- (tap = clic), dos dedos = scroll, 2/3 dedos tap = atajos; dedos apoyados ANTES del Pencil = gesto mientras
+// ---- duren (1: goma, 2: botón medio, 3: botón derecho); dedos que llegan DESPUÉS del Pencil o cerca de su punta = palma. ----
 function norm(cx,cy){
   const W=innerWidth,H=innerHeight;
   if(!vw||!vh)return [cx/W,cy/H];
@@ -203,85 +289,322 @@ function norm(cx,cy){
 }
 // Cada evento lleva t = reloj del servidor estimado (medición de latencia de input), cuando ya hay reloj sincronizado.
 const send=o=>{if(ws&&ws.readyState===1)ws.send(JSON.stringify(Object.assign({type:'input'},o,clock.offset!==null?{t:serverNow()}:{})));};
-let pendingMove=null, raf=0, touches=new Map(), lastScrollY=null, lastScrollX=null, tapStart=null, penDown=false;
+// ?pen=mouse: en una PC el mouse hace de Pencil (presión 0.5), para probar preview y panel sin iPad.
+const MOUSE_AS_PEN=/[?&]pen=mouse/.test(location.search);
+const isPen=e=>e.pointerType==='pen'||(MOUSE_AS_PEN&&e.pointerType==='mouse');
+const pressureOf=e=>(MOUSE_AS_PEN&&e.pointerType==='mouse')?((e.buttons&1)?0.5:0):e.pressure;
+let pendingMove=null, raf=0, lastPos=null, penDown=false, penMode=null;   // penMode: null (lápiz) o {btn} (el Pencil hace de botón del mouse)
+const fingers=new Map();       // pointerId -> {x,y,x0,y0,t0,palm}
+let group=null;                // toques desde que bajó el primer dedo hasta que no queda ninguno: {t0,maxN,moved,used}
+let hold=null;                 // gesto mantenido activo: {n, action, pendingEnd}
+let scroll=null;               // {cx,cy,active}
+let lastTap=null;              // {t,x,y} para que el segundo toque de un doble clic caiga en el mismo punto
+let barMouseBtn=null;          // botón del mouse mantenido desde la barra: el Pencil actúa como ese botón
 function flush(){raf=0;if(pendingMove){send(pendingMove);pendingMove=null;}}
-function queueMove(x,y){pendingMove={ev:'move',x:x,y:y};if(!raf)raf=requestAnimationFrame(flush);}
+function queueMove(x,y){lastPos=[x,y];pendingMove={ev:'move',x:x,y:y};if(!raf)raf=requestAnimationFrame(flush);}
 const tilt=e=>[Math.round(e.tiltX||0),Math.round(e.tiltY||0)];
+const liveFingers=()=>Array.from(fingers.values()).filter(f=>!f.palm);
+
+// Acciones de gestos y botones: {type:'key'|'click'|'mouse'|'toggle'|'mod'}
+function runTap(a,x,y){
+  if(!a)return;
+  if(a.type==='key')send({ev:'key',keys:a.keys});
+  else if(a.type==='click'){const o=x!=null?{x:x,y:y}:(lastPos?{x:lastPos[0],y:lastPos[1]}:{});flush();
+    send(Object.assign({ev:'down',btn:a.btn||0},o));send(Object.assign({ev:'up',btn:a.btn||0},o));}
+  else if(a.type==='mouse')runTap({type:'click',btn:a.btn},x,y);
+  else if(a.type==='toggle'){send({ev:'key',keys:a.keys[0]});}
+  else if(a.type==='mod'){send({ev:'mod',key:a.key,down:true});send({ev:'mod',key:a.key,down:false});}
+}
+// Gesto mantenido: empieza cuando el Pencil toca con n dedos apoyados, termina al levantar los dedos (si el Pencil
+// sigue abajo, al levantarlo). toggle: keys[0] al empezar, keys[1] al terminar. mod: mantenido. mouse: el Pencil
+// hace de ese botón durante el gesto.
+function startHold(n,a){
+  hold={n:n,action:a,pendingEnd:false};
+  if(a.type==='toggle')send({ev:'key',keys:a.keys[0]});
+  else if(a.type==='mod')send({ev:'mod',key:a.key,down:true});
+  else if(a.type==='key')send({ev:'key',keys:a.keys});
+  penHud=n+'☝ '+(a.type==='toggle'?a.keys[0].toUpperCase():a.type==='mod'?a.key:a.type==='mouse'?(a.btn===1?'medio':'derecho'):a.keys||'');
+}
+function endHold(){
+  if(!hold)return;
+  if(penDown){hold.pendingEnd=true;return;}
+  const a=hold.action;hold=null;penHud='';
+  if(a.type==='toggle'&&a.keys[1])send({ev:'key',keys:a.keys[1]});
+  else if(a.type==='mod')send({ev:'mod',key:a.key,down:false});
+}
 
 pad.addEventListener('pointerdown',function(e){
-  pad.setPointerCapture(e.pointerId);
+  try{pad.setPointerCapture(e.pointerId);}catch(err){}
   const n=norm(e.clientX,e.clientY), x=n[0], y=n[1];
-  if(e.pointerType==='pen'){
-    const t=tilt(e);penDown=true;
-    send({ev:'down',pen:1,x:x,y:y,p:e.pressure,tx:t[0],ty:t[1],btn:(e.buttons&2)?2:0});penHud='pen '+e.pressure.toFixed(2);return;}
+  if(isPen(e)){
+    const G=gestures();
+    // Dedos apoyados antes del Pencil: los cercanos a la punta son palma; los lejanos, un gesto.
+    let gest=0;
+    fingers.forEach(f=>{
+      if(f.palm)return;
+      if(G.palmRadius>0&&Math.hypot(f.x-e.clientX,f.y-e.clientY)<G.palmRadius){f.palm=true;return;}
+      gest++;
+    });
+    if(!hold&&gest>0&&pencfg.gestures&&G['hold'+gest]){startHold(gest,G['hold'+gest]);if(group)group.used=true;}
+    scroll=null;
+    penDown=true;lastPos=[x,y];
+    const btn=(hold&&hold.action.type==='mouse')?hold.action.btn:barMouseBtn;
+    if(btn!=null){penMode={btn:btn};flush();send({ev:'down',x:x,y:y,btn:btn});return;}
+    penMode=null;
+    const t=tilt(e), p=pressureOf(e);
+    send({ev:'down',pen:1,x:x,y:y,p:p,tx:t[0],ty:t[1],btn:(e.buttons&2)?2:0});
+    showPressure(p);previewStart(e);return;}
   if(penDown)return;                       // palma o dedo mientras se dibuja
-  touches.set(e.pointerId,{x:e.clientX,y:e.clientY});
-  if(touches.size===1){tapStart={t:performance.now(),x:e.clientX,y:e.clientY};queueMove(x,y);}
-  if(touches.size===2){lastScrollY=null;tapStart=null;}
+  const G=gestures();
+  if((e.width>G.palmSize||e.height>G.palmSize)&&e.pointerType==='touch'){fingers.set(e.pointerId,{palm:true,x:e.clientX,y:e.clientY});return;}
+  fingers.set(e.pointerId,{x:e.clientX,y:e.clientY,x0:e.clientX,y0:e.clientY,t0:performance.now(),palm:false});
+  const live=liveFingers();
+  if(!group)group={t0:performance.now(),maxN:0,moved:false,used:!!hold};
+  group.maxN=Math.max(group.maxN,live.length);
+  if(live.length===1&&!hold)queueMove(x,y);
+  if(live.length===2&&!hold)scroll={cx:(live[0].x+live[1].x)/2,cy:(live[0].y+live[1].y)/2,active:false};
+  if(live.length>2)scroll=null;
 });
 pad.addEventListener('pointermove',function(e){
   const n=norm(e.clientX,e.clientY), x=n[0], y=n[1];
-  if(e.pointerType==='pen'){
-    if(e.buttons&1){
+  if(isPen(e)){
+    if(penDown&&penMode){queueMove(x,y);return;}   // el Pencil hace de botón del mouse: solo mover
+    if(penDown&&(e.buttons&1||MOUSE_AS_PEN)){
       // Trayectoria completa: todos los eventos coalescidos del frame, no solo el último.
       const evs=(e.getCoalescedEvents&&e.getCoalescedEvents())||[];
-      const pts=(evs.length?evs:[e]).map(c=>{const m=norm(c.clientX,c.clientY),t=tilt(c);return [m[0],m[1],c.pressure,t[0],t[1]];});
-      send({ev:'moves',pen:1,pts:pts});penHud='pen '+e.pressure.toFixed(2);
-    }else{const t=tilt(e);send({ev:'hover',pen:1,x:x,y:y,tx:t[0],ty:t[1]});penHud='hover';}
+      const pts=(evs.length?evs:[e]).map(c=>{const m=norm(c.clientX,c.clientY),t=tilt(c);return [m[0],m[1],pressureOf(c),t[0],t[1]];});
+      send({ev:'moves',pen:1,pts:pts});lastPos=[x,y];showPressure(pressureOf(e));previewMove(e,evs);
+    }else if(!penDown){const t=tilt(e);send({ev:'hover',pen:1,x:x,y:y,tx:t[0],ty:t[1]});penHud=hold?penHud:'hover';}
     return;}
-  if(!touches.has(e.pointerId))return;
-  touches.set(e.pointerId,{x:e.clientX,y:e.clientY});
-  if(touches.size===1){queueMove(x,y);}
-  else if(touches.size===2){
-    const pts=Array.from(touches.values());const cy=(pts[0].y+pts[1].y)/2, cx=(pts[0].x+pts[1].x)/2;
-    if(lastScrollY!==null){const dy=cy-lastScrollY, dx=cx-lastScrollX;if(Math.abs(dy)>2||Math.abs(dx)>2)send({ev:'scroll',dy:Math.round(dy*3),dx:Math.round(-dx*3)});}
-    lastScrollY=cy;lastScrollX=cx;
+  const f=fingers.get(e.pointerId);
+  if(!f||f.palm)return;
+  f.x=e.clientX;f.y=e.clientY;
+  const G=gestures();
+  if(Math.hypot(f.x-f.x0,f.y-f.y0)>G.tapPx&&group)group.moved=true;
+  if(hold||penDown)return;                 // los dedos del gesto no mueven el cursor ni hacen scroll
+  const live=liveFingers();
+  if(live.length===1){queueMove(x,y);}
+  else if(live.length===2&&scroll){
+    const cx=(live[0].x+live[1].x)/2, cy=(live[0].y+live[1].y)/2;
+    // Hasta moverse tapPx (o pasar tapMs) puede ser un toque de dos dedos: no hacer scroll todavía.
+    if(!scroll.active&&(Math.hypot(cx-scroll.cx,cy-scroll.cy)>G.tapPx||performance.now()-group.t0>G.tapMs)){scroll.active=true;scroll.cx=cx;scroll.cy=cy;}
+    if(scroll.active){const dy=cy-scroll.cy, dx=cx-scroll.cx;if(Math.abs(dy)>2||Math.abs(dx)>2){send({ev:'scroll',dy:Math.round(dy*3),dx:Math.round(-dx*3)});scroll.cx=cx;scroll.cy=cy;}}
   }
 });
-function endPointer(e){
+function endPointer(e,cancelled){
   const n=norm(e.clientX,e.clientY), x=n[0], y=n[1];
-  if(e.pointerType==='pen'){penDown=false;send({ev:'up',pen:1,x:x,y:y});penHud='';return;}
-  touches.delete(e.pointerId);
-  if(tapStart&&touches.size===0){
-    const dt=performance.now()-tapStart.t, d=Math.hypot(e.clientX-tapStart.x,e.clientY-tapStart.y);
-    if(dt<250&&d<12){flush();send({ev:'down',x:x,y:y,btn:0});send({ev:'up',x:x,y:y,btn:0});}
-    tapStart=null;
+  if(isPen(e)){
+    if(!penDown)return;
+    penDown=false;
+    if(penMode){flush();send({ev:'up',x:x,y:y,btn:penMode.btn});penMode=null;}
+    else{send({ev:'up',pen:1,x:x,y:y});previewEnd();showPressure(0);}
+    if(hold&&hold.pendingEnd)endHold();else if(!hold)penHud='';
+    return;}
+  const f=fingers.get(e.pointerId);
+  fingers.delete(e.pointerId);
+  const live=liveFingers(), G=gestures(), now=performance.now();
+  if(live.length===0&&hold)endHold();
+  if(f&&!f.palm&&live.length===0&&group&&!cancelled){   // iPadOS cancela los toques que decide que son palma: nunca son un clic
+    // Toque corto de 1, 2 o 3 dedos sin moverse: 1 = clic (en el punto del toque), 2 y 3 = atajos de shortcuts.json.
+    // Tres dedos no caen a la vez: un poco más de margen que para uno.
+    const isTap=!group.used&&!group.moved&&now-group.t0<G.tapMs+(group.maxN>1?100:0);
+    if(isTap&&(group.maxN===1||pencfg.gestures)){
+      let tx=x, ty=y;
+      // Segundo toque de un doble clic: mismo punto que el primero, para que Windows lo tome como doble clic.
+      if(group.maxN===1&&lastTap&&now-lastTap.t<G.doubleMs&&Math.hypot(e.clientX-lastTap.x,e.clientY-lastTap.y)<G.tapPx*2.4){tx=lastTap.nx;ty=lastTap.ny;}
+      if(group.maxN===1)lastTap={t:now,x:e.clientX,y:e.clientY,nx:tx,ny:ty};
+      runTap(G['tap'+group.maxN],group.maxN===1?tx:null,group.maxN===1?ty:null);
+    }
   }
-  if(touches.size<2)lastScrollY=null;
+  if(live.length===0){group=null;scroll=null;}
+  else if(live.length<2)scroll=null;
 }
-pad.addEventListener('pointerup',endPointer);pad.addEventListener('pointercancel',endPointer);
+pad.addEventListener('pointerup',endPointer);pad.addEventListener('pointercancel',function(e){endPointer(e,true);});
 // El Pencil se alejó de la pantalla (o terminó el trazo en iPads sin hover): Windows vuelve al cursor normal.
-pad.addEventListener('pointerleave',function(e){if(e.pointerType==='pen'&&!penDown){send({ev:'leave',pen:1});penHud='';}});
+pad.addEventListener('pointerleave',function(e){if(isPen(e)&&!penDown){send({ev:'leave',pen:1});if(!hold)penHud='';}});
 pad.addEventListener('contextmenu',function(e){e.preventDefault();});
 document.addEventListener('gesturestart',function(e){e.preventDefault();});
 document.addEventListener('dblclick',function(e){e.preventDefault();});
 
-// ---- Barra de teclas (estilo ExpressKeys). Está encima de #pad, así que sus toques no llegan a la lógica de
-// ---- dedos/palma: un dedo mantiene Shift/Ctrl/Alt/Espacio mientras el Pencil dibuja. Los modificadores mandan
-// ---- {ev:'mod',key,down:true} al apoyar y down:false al soltar; las pulsaciones {ev:'key',keys:'ctrl+z'} al apoyar. ----
-const bar=document.getElementById('bar'), tab=document.getElementById('tab');
+// ---- Previsualización local del trazo: el input llega a la PC antes de que vuelva el video; mientras, una línea
+// ---- fina sigue al Pencil (con los puntos predichos de Safari) y se borra sola a los pvMs ms, cuando el video ya
+// ---- la alcanzó. Al levantar el lápiz o cambiar de herramienta no queda nada. ----
+const ov=document.getElementById('ov'), octx=ov.getContext('2d');
+let pvPts=[], pvPred=[], pvRaf=0;
+function fitOverlay(){const d=devicePixelRatio||1;if(ov.width!==innerWidth*d||ov.height!==innerHeight*d){ov.width=innerWidth*d;ov.height=innerHeight*d;}}
+addEventListener('resize',fitOverlay);fitOverlay();
+function previewStart(e){if(!pencfg.preview)return;pvPts=[{x:e.clientX,y:e.clientY,t:performance.now()}];pvPred=[];pvTick();}
+function previewMove(e,evs){
+  if(!pencfg.preview||!pvPts.length)return;
+  const now=performance.now();
+  (evs.length?evs:[e]).forEach(c=>pvPts.push({x:c.clientX,y:c.clientY,t:now}));
+  pvPred=(e.getPredictedEvents&&e.getPredictedEvents()||[]).map(c=>({x:c.clientX,y:c.clientY}));
+  if(!pvRaf)pvTick();
+}
+function previewEnd(){pvPred=[];}          // los puntos reales se apagan solos; lo predicho se borra ya
+function previewClear(){pvPts=[];pvPred=[];octx.clearRect(0,0,ov.width,ov.height);}
+function pvTick(){
+  pvRaf=0;
+  const now=performance.now(), ms=pencfg.pvMs, d=devicePixelRatio||1;
+  while(pvPts.length&&now-pvPts[0].t>ms)pvPts.shift();
+  octx.clearRect(0,0,ov.width,ov.height);
+  if(!pvPts.length){pvPred=[];return;}
+  octx.lineCap=octx.lineJoin='round';octx.lineWidth=pencfg.pvWidth*d;octx.strokeStyle=pencfg.pvColor;
+  for(let i=1;i<pvPts.length;i++){      // cada tramo se desvanece con su edad: el video lo va "alcanzando"
+    octx.globalAlpha=Math.max(0,1-(now-pvPts[i].t)/ms);
+    octx.beginPath();octx.moveTo(pvPts[i-1].x*d,pvPts[i-1].y*d);octx.lineTo(pvPts[i].x*d,pvPts[i].y*d);octx.stroke();
+  }
+  if(pvPred.length&&penDown){
+    octx.globalAlpha=.45;octx.beginPath();const l=pvPts[pvPts.length-1];octx.moveTo(l.x*d,l.y*d);
+    pvPred.forEach(p=>octx.lineTo(p.x*d,p.y*d));octx.stroke();
+  }
+  octx.globalAlpha=1;
+  pvRaf=requestAnimationFrame(pvTick);
+}
+
+// ---- Barra de teclas (estilo ExpressKeys) armada desde el perfil activo. Está encima de #pad, así que sus toques
+// ---- no llegan a la lógica de dedos/palma: un dedo mantiene Shift/Ctrl/Alt/Espacio mientras el Pencil dibuja.
+// ---- mod: {ev:'mod',key,down} al apoyar/soltar; key: {ev:'key',keys} al apoyar; toggle: alterna dos atajos;
+// ---- mouse: mantenido, el Pencil hace de ese botón; tocado solo, clic de ese botón donde está el cursor. ----
+const bar=document.getElementById('bar'), tab=document.getElementById('tab'), keysBox=document.getElementById('keys'), cfgBox=document.getElementById('cfg');
 const held=new Map();   // pointerId -> modificador mantenido (se pueden mantener dos a la vez)
-let gripTimer=0;
-function setSide(r){bar.classList.toggle('right',r);tab.classList.toggle('right',r);tab.textContent=r?'‹':'›';try{localStorage.keyBarRight=r?'1':'';}catch(e){}}
+let gripTimer=0, mouseHold=null;   // mouseHold: {id, btn, used}
+function setSide(r){bar.classList.toggle('right',r);tab.classList.toggle('right',r);cfgBox.classList.toggle('right',r);tab.textContent=r?'‹':'›';try{localStorage.keyBarRight=r?'1':'';}catch(e){}}
 try{setSide(!!localStorage.keyBarRight);}catch(e){}
-function releaseHeld(){held.forEach(mod=>send({ev:'mod',key:mod,down:false}));held.clear();bar.querySelectorAll('.on,.pressed').forEach(b=>b.classList.remove('on','pressed'));}
+function buildBar(){
+  keysBox.innerHTML='';
+  bar.querySelector('[data-prof]').textContent=profile.short||profile.name||'···';
+  (profile.buttons||[]).forEach((b,i)=>{
+    if(b.type==='sep'){keysBox.appendChild(document.createElement('hr'));return;}
+    const el=document.createElement('button');el.dataset.i=i;
+    const lab=b.type==='toggle'?(b.labels&&b.labels[0]||b.keys[0].toUpperCase()):(b.label||(b.keys||b.key||'').toUpperCase());
+    el.innerHTML='<span class="l"></span>'+(b.caption?'<small></small>':'');
+    el.querySelector('.l').textContent=lab;if(b.caption)el.querySelector('small').textContent=b.caption;
+    keysBox.appendChild(el);
+  });
+}
+function releaseHeld(){
+  held.forEach(mod=>send({ev:'mod',key:mod,down:false}));held.clear();
+  mouseHold=null;barMouseBtn=null;
+  bar.querySelectorAll('.on,.pressed').forEach(b=>{if(b.dataset.i===undefined||(profile.buttons||[])[b.dataset.i].type!=='toggle')b.classList.remove('on','pressed');});
+}
 bar.addEventListener('pointerdown',function(e){
   const b=e.target.closest('button');if(!b)return;
   e.preventDefault();e.stopPropagation();try{b.setPointerCapture(e.pointerId);}catch(err){}b.classList.add('pressed');
-  if(b.dataset.mod!==undefined){held.set(e.pointerId,b.dataset.mod);b.classList.add('on');send({ev:'mod',key:b.dataset.mod,down:true});}
-  else if(b.dataset.key!==undefined)send({ev:'key',keys:b.dataset.key});
+  if(b.dataset.i!==undefined){
+    const a=profile.buttons[b.dataset.i];
+    if(a.type==='mod'){held.set(e.pointerId,a.key);b.classList.add('on');send({ev:'mod',key:a.key,down:true});}
+    else if(a.type==='key')send({ev:'key',keys:a.keys});
+    else if(a.type==='toggle'){const on=b.classList.toggle('on');send({ev:'key',keys:a.keys[on?0:1]});}   // iluminado = keys[0] activo (goma)
+    else if(a.type==='mouse'){mouseHold={id:e.pointerId,btn:a.btn,used:false};barMouseBtn=a.btn;b.classList.add('on');}
+  }
   else if(b.dataset.grip!==undefined)gripTimer=setTimeout(function(){gripTimer=0;setSide(!bar.classList.contains('right'));},500);
-  else if(b.dataset.hide!==undefined){releaseHeld();bar.hidden=true;tab.hidden=false;}
+  else if(b.dataset.prof!==undefined){nextProfile();}
+  else if(b.dataset.cfg!==undefined){cfgBox.hidden=!cfgBox.hidden;if(!cfgBox.hidden)updateCfgPanel();}
+  else if(b.dataset.hide!==undefined){releaseHeld();bar.hidden=true;tab.hidden=false;cfgBox.hidden=true;}
 });
 function barUp(e){
   const b=e.target.closest('button');if(b)b.classList.remove('pressed');
   if(gripTimer){clearTimeout(gripTimer);gripTimer=0;}
   const mod=held.get(e.pointerId);
   if(mod!==undefined){held.delete(e.pointerId);if(b)b.classList.remove('on');send({ev:'mod',key:mod,down:false});}
+  if(mouseHold&&mouseHold.id===e.pointerId){
+    // Soltado sin haber dibujado: clic de ese botón donde está el cursor (menú de pinceles con el derecho, etc.)
+    if(!mouseHold.used&&!penDown)runTap({type:'click',btn:mouseHold.btn});
+    if(b)b.classList.remove('on');mouseHold=null;barMouseBtn=null;
+  }
+  if(b&&b.dataset.kbd!==undefined)toggleKeyboard();   // focus() tiene que ir en el gesto del usuario
 }
 bar.addEventListener('pointerup',barUp);bar.addEventListener('pointercancel',barUp);
 bar.addEventListener('contextmenu',function(e){e.preventDefault();});
 tab.addEventListener('pointerdown',function(e){e.preventDefault();bar.hidden=false;tab.hidden=true;});
-window.addEventListener('blur',releaseHeld);   // al salir de Safari no dejar un modificador pegado
+window.addEventListener('blur',function(){penDown=false;penMode=null;fingers.clear();group=null;scroll=null;releaseHeld();endHold();previewClear();});   // al salir de Safari no dejar nada pegado
+// Marcar el botón de mouse de la barra como usado cuando el Pencil dibuja con él (para no mandar un clic suelto al soltar).
+pad.addEventListener('pointerdown',function(e){if(isPen(e)&&mouseHold)mouseHold.used=true;});
+function nextProfile(){
+  const i=shortcuts.profiles.indexOf(profile);manualProfile=true;
+  profile=shortcuts.profiles[(i+1)%shortcuts.profiles.length];releaseHeld();buildBar();updateCfgPanel();
+}
+
+// ---- Teclado: un campo oculto recibe el teclado en pantalla del iPad o el físico conectado; las teclas van a la PC.
+// ---- Letras y signos como texto ({ev:'text'}); Intro, flechas, F1-F12 y todo lo que lleve Ctrl/Alt/Cmd como atajo ({ev:'key'}). ----
+const kb=document.getElementById('kb'), kbhint=document.getElementById('kbhint');
+const SPECIAL={Enter:'enter',Backspace:'backspace',Tab:'tab',Escape:'esc',Delete:'delete',Insert:'insert',Home:'home',End:'end',
+  PageUp:'pageup',PageDown:'pagedown',ArrowLeft:'left',ArrowRight:'right',ArrowUp:'up',ArrowDown:'down',' ':'space'};
+function toggleKeyboard(){if(document.activeElement===kb){kb.blur();}else{kb.value='';kb.focus();}}
+kb.addEventListener('focus',()=>{kbhint.hidden=false;});
+kb.addEventListener('blur',()=>{kbhint.hidden=true;});
+kb.addEventListener('keydown',function(e){
+  if(e.isComposing||e.keyCode===229||e.key==='Dead'||e.key==='Unidentified')return;
+  if(['Shift','Control','Alt','Meta','CapsLock'].includes(e.key))return;
+  const fkey=/^F\d{1,2}$/.test(e.key)?e.key.toLowerCase():null;
+  const special=SPECIAL[e.key]||fkey;
+  const mods=[e.ctrlKey&&'ctrl',e.altKey&&'alt',e.metaKey&&'win'].filter(Boolean);
+  if(special||mods.length){
+    e.preventDefault();
+    if(e.shiftKey)mods.push('shift');
+    // Con Alt/Option el iPad cambia el carácter (option+a = å): usar la tecla física (KeyA, Digit1) si la hay.
+    let k=special;
+    if(!k){const m=/^(Key|Digit)(\w)$/.exec(e.code||'');k=m?m[2].toLowerCase():e.key.toLowerCase();}
+    send({ev:'key',keys:mods.concat([k]).join('+')});
+  }
+  // Un carácter solo (con o sin shift) sigue hasta el evento input y va como texto, con la mayúscula que corresponda.
+});
+kb.addEventListener('input',function(e){
+  const t=e.data!=null?e.data:kb.value;
+  if(t)send({ev:'text',text:t});
+  kb.value='';
+});
+
+// ---- Panel de ajustes: presión (presets suave/lineal/firme, gamma, mínimo, suavizado) con lectura en vivo,
+// ---- previsualización, gestos y perfil. Todo se guarda en localStorage; la presión se manda como pencfg. ----
+const $=id=>document.getElementById(id);
+const curve=$('curve'), cctx=curve.getContext('2d');
+let lastRaw=0;
+function drawCurve(){
+  const W=curve.width;cctx.clearRect(0,0,W,W);
+  cctx.strokeStyle='rgba(255,255,255,.15)';cctx.lineWidth=2;cctx.beginPath();cctx.moveTo(0,W);cctx.lineTo(W,0);cctx.stroke();
+  cctx.strokeStyle='#ffdc00';cctx.lineWidth=3;cctx.beginPath();
+  for(let i=0;i<=W;i+=4){const p=i/W, o=p>0?Math.max(pencfg.min,Math.pow(p,pencfg.gamma)):0;cctx.lineTo(i,W-o*W);}
+  cctx.stroke();
+  if(lastRaw>0){const o=Math.max(pencfg.min,Math.pow(lastRaw,pencfg.gamma));cctx.fillStyle='#6f6';cctx.beginPath();cctx.arc(lastRaw*W,W-o*W,7,0,7);cctx.fill();}
+}
+function showPressure(p){
+  lastRaw=p||0;
+  const out=lastRaw>0?Math.max(pencfg.min,Math.pow(lastRaw,pencfg.gamma)):0;
+  if(!hold)penHud=penDown?'pen '+lastRaw.toFixed(2)+'→'+out.toFixed(2):'';
+  if(cfgBox.hidden)return;
+  $('mRaw').style.width=(lastRaw*100)+'%';$('mRawV').textContent=lastRaw.toFixed(2);
+  $('mOut').style.width=(out*100)+'%';$('mOutV').textContent=out.toFixed(2);
+  drawCurve();
+}
+function updateCfgPanel(){
+  $('gamma').value=pencfg.gamma;$('gammaV').textContent=(+pencfg.gamma).toFixed(2);
+  $('pmin').value=pencfg.min;$('pminV').textContent=(+pencfg.min).toFixed(3);
+  $('smooth').value=pencfg.smooth;$('smoothV').textContent=pencfg.smooth>0?(+pencfg.smooth).toFixed(2):'off';
+  cfgBox.querySelectorAll('[data-preset]').forEach(b=>b.classList.toggle('on',Math.abs(+b.dataset.preset-pencfg.gamma)<0.01));
+  $('pvOn').checked=!!pencfg.preview;$('pvColor').value=pencfg.pvColor;$('pvWidth').value=pencfg.pvWidth;$('pvWidthV').textContent=(+pencfg.pvWidth).toFixed(2);
+  $('pvMs').value=pencfg.pvMs;$('pvMsV').textContent=pencfg.pvMs+' ms';
+  const G=gestures();
+  $('gOn').checked=!!pencfg.gestures;$('palmR').value=G.palmRadius;$('palmRV').textContent=G.palmRadius+' px';
+  const d=a=>!a?'—':a.type==='key'?a.keys:a.type==='toggle'?a.keys.join('/'):a.type==='mod'?a.key:a.type==='mouse'?(a.btn===1?'medio':'derecho'):a.type;
+  $('gDesc').textContent='2☝ '+d(G.tap2)+' · 3☝ '+d(G.tap3)+' · ✎+1 '+d(G.hold1)+' · ✎+2 '+d(G.hold2)+' · ✎+3 '+d(G.hold3);
+  $('appV').textContent=(appExe||'—')+' → '+(profile.name||profile.id)+(manualProfile?' (a mano)':'');
+  drawCurve();
+}
+function setCfg(k,v,toServer){pencfg[k]=v;savePenCfg();updateCfgPanel();if(toServer)sendPenCfg();}
+$('gamma').addEventListener('input',e=>setCfg('gamma',+e.target.value,true));
+$('pmin').addEventListener('input',e=>setCfg('min',+e.target.value,true));
+$('smooth').addEventListener('input',e=>setCfg('smooth',+e.target.value,true));
+cfgBox.querySelectorAll('[data-preset]').forEach(b=>b.addEventListener('click',()=>setCfg('gamma',+b.dataset.preset,true)));
+$('pvOn').addEventListener('change',e=>{setCfg('preview',e.target.checked);if(!e.target.checked)previewClear();});
+$('pvColor').addEventListener('input',e=>setCfg('pvColor',e.target.value));
+$('pvWidth').addEventListener('input',e=>setCfg('pvWidth',+e.target.value));
+$('pvMs').addEventListener('input',e=>setCfg('pvMs',+e.target.value));
+$('gOn').addEventListener('change',e=>setCfg('gestures',e.target.checked));
+$('palmR').addEventListener('input',e=>setCfg('palmRadius',+e.target.value));
+cfgBox.querySelector('[data-nextprof]').addEventListener('click',nextProfile);
+cfgBox.querySelector('[data-autoprof]').addEventListener('click',()=>{manualProfile=false;pickProfile();});
+buildBar();updateCfgPanel();
 connectWS();
 </script></body></html>

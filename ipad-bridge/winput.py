@@ -8,6 +8,7 @@ import ctypes
 import logging
 import math
 import os
+import re
 import time
 from ctypes import wintypes
 
@@ -61,33 +62,83 @@ def _send(flags, dx=0, dy=0, data=0):
 
 
 INPUT_KEYBOARD = 1
+KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_KEYUP = 0x0002
+KEYEVENTF_UNICODE = 0x0004
 VK = {"ctrl": 0x11, "shift": 0x10, "alt": 0x12, "win": 0x5B, "esc": 0x1B, "tab": 0x09, "space": 0x20, "enter": 0x0D,
       "backspace": 0x08, "delete": 0x2E, "f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73, "f5": 0x74, "f6": 0x75,
-      "f7": 0x76, "f8": 0x77, "f9": 0x78, "f10": 0x79, "f11": 0x7A, "f12": 0x7B, "[": 0xDB, "]": 0xDD}
+      "f7": 0x76, "f8": 0x77, "f9": 0x78, "f10": 0x79, "f11": 0x7A, "f12": 0x7B, "[": 0xDB, "]": 0xDD,
+      # Navegación y edición
+      "left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28, "home": 0x24, "end": 0x23, "pageup": 0x21, "pagedown": 0x22,
+      "insert": 0x2D, "capslock": 0x14, "numlock": 0x90, "scrolllock": 0x91, "pause": 0x13, "printscreen": 0x2C,
+      "apps": 0x5D, "f13": 0x7C, "f14": 0x7D, "f15": 0x7E, "f16": 0x7F, "f17": 0x80, "f18": 0x81, "f19": 0x82,
+      "f20": 0x83, "f21": 0x84, "f22": 0x85, "f23": 0x86, "f24": 0x87,
+      # Teclado numérico
+      "num0": 0x60, "num1": 0x61, "num2": 0x62, "num3": 0x63, "num4": 0x64, "num5": 0x65, "num6": 0x66, "num7": 0x67,
+      "num8": 0x68, "num9": 0x69, "num*": 0x6A, "num+": 0x6B, "num-": 0x6D, "num.": 0x6E, "num/": 0x6F,
+      # Multimedia
+      "volumeup": 0xAF, "volumedown": 0xAE, "mute": 0xAD, "playpause": 0xB3}
+# Sinónimos (nombres de KeyboardEvent.key de Safari y abreviaturas habituales)
+VK_ALIAS = {"control": "ctrl", "meta": "win", "cmd": "win", "command": "win", "option": "alt", "escape": "esc",
+            "return": "enter", "del": "delete", "bksp": "backspace", "ins": "insert", "pgup": "pageup", "pgdn": "pagedown",
+            "arrowleft": "left", "arrowright": "right", "arrowup": "up", "arrowdown": "down", "spacebar": "space",
+            "esp": "space", "supr": "delete", "inicio": "home", "fin": "end", "contextmenu": "apps", "prtsc": "printscreen"}
+# Teclas que Windows marca como "extendidas" (scan code E0): sin la bandera algunas apps las confunden con el numérico.
+VK_EXTENDED = {0x25, 0x26, 0x27, 0x28, 0x24, 0x23, 0x21, 0x22, 0x2D, 0x2E, 0x90, 0x2C, 0x5B, 0x5D, 0x6F, 0xAF, 0xAE, 0xAD, 0xB3}
+
+
+def _vk_mods(name):
+    """(código de tecla virtual, modificadores que necesita) para un nombre de tecla. Un carácter suelto se resuelve
+    con la distribución del teclado activa: '{' es shift+'[' en un teclado US y AltGr+' en uno español."""
+    name = name.strip().lower()
+    name = VK_ALIAS.get(name, name)
+    if name in VK:
+        return VK[name], []
+    if len(name) == 1:
+        r = user32.VkKeyScanW(ord(name))
+        if r != -1 and (r & 0xFF) != 0xFF:
+            st = (r >> 8) & 0xFF
+            mods = [VK[m] for bit, m in ((1, "shift"), (2, "ctrl"), (4, "alt")) if st & bit]
+            return r & 0xFF, mods
+    raise ValueError(f"tecla desconocida: {name}")
 
 
 def _vk(name):
-    name = name.strip().lower()
-    if name in VK:
-        return VK[name]
-    if len(name) == 1:
-        r = user32.VkKeyScanW(ord(name))
-        if r != -1:
-            return r & 0xFF
-    raise ValueError(f"tecla desconocida: {name}")
+    return _vk_mods(name)[0]
 
 
 def _key(vk, up=False):
     inp = INPUT(type=INPUT_KEYBOARD)
-    inp.ki = KEYBDINPUT(vk, 0, KEYEVENTF_KEYUP if up else 0, 0, None)
+    flags = (KEYEVENTF_KEYUP if up else 0) | (KEYEVENTF_EXTENDEDKEY if vk in VK_EXTENDED else 0)
+    inp.ki = KEYBDINPUT(vk, 0, flags, 0, None)
     user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
 
+def type_text(text):
+    """Escribe texto tal cual (teclado en pantalla del iPad): cada carácter va como KEYEVENTF_UNICODE, así no
+    depende de la distribución del teclado ni del estado de shift/bloq mayús."""
+    for ch in str(text):
+        raw = ch.encode("utf-16-le")   # un emoji son dos unidades (par sustituto): van las dos
+        units = [int.from_bytes(raw[i:i + 2], "little") for i in range(0, len(raw), 2)]
+        for u in units:
+            for up in (False, True):
+                inp = INPUT(type=INPUT_KEYBOARD)
+                inp.ki = KEYBDINPUT(0, u, KEYEVENTF_UNICODE | (KEYEVENTF_KEYUP if up else 0), 0, None)
+                user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+
+
 def tap_keys(spec):
-    """Pulsa un atajo en la ventana activa: 'e', 'ctrl+z', 'ctrl+shift+z'. Modificadores: ctrl, shift, alt, win.
-    Si la barra de teclas tiene un modificador mantenido (hold_key) se suma, como en un teclado real."""
-    keys = [_vk(k) for k in spec.split("+") if k.strip()]
+    """Pulsa un atajo en la ventana activa: 'e', 'ctrl+z', 'ctrl+shift+z', 'ctrl+num+'. Modificadores: ctrl, shift, alt,
+    win. Un carácter que en el teclado activo pide shift ('{', '+') lo agrega solo. Si la barra de teclas tiene un
+    modificador mantenido (hold_key) se suma, como en un teclado real."""
+    # Separador '+'; "num+" es un nombre y un '+' final suelto ("ctrl++", "+") es la tecla más.
+    parts = re.findall(r"num[+*\-./]|[^+]+|\+(?=$)", spec.strip())
+    keys, extra = [], []
+    for k in parts:
+        vk, mods = _vk_mods(k)
+        keys.append(vk)
+        extra += [m for m in mods if m not in keys and m not in extra and m not in _held]
+    keys = extra + keys
     for k in keys:
         _key(k)
     for k in reversed(keys):
@@ -176,6 +227,32 @@ def target_display():
         if d.StateFlags & 4 or primary is None:
             primary = info
     return primary
+
+
+def foreground_app():
+    """Ventana activa de Windows: (nombre del ejecutable, título). Para la barra de atajos por aplicación del iPad.
+    Devuelve ("", "") si no hay ventana o no se puede consultar (ventanas del sistema con más privilegios)."""
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return "", ""
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    exe = ""
+    if pid.value:
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        h = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+        if h:
+            try:
+                buf = ctypes.create_unicode_buffer(1024)
+                size = wintypes.DWORD(len(buf))
+                if ctypes.windll.kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                    exe = os.path.basename(buf.value)
+            finally:
+                ctypes.windll.kernel32.CloseHandle(h)
+    n = user32.GetWindowTextLengthW(hwnd)
+    title = ctypes.create_unicode_buffer(n + 1)
+    user32.GetWindowTextW(hwnd, title, n + 1)
+    return exe, title.value
 
 
 class Mouse:
@@ -288,6 +365,38 @@ def tilt_from_angles(altitude, azimuth):
     return int(round(tx)), int(round(ty))
 
 
+class OneEuro:
+    """Filtro 1€ (Casiez 2012): paso bajo cuya frecuencia de corte sube con la velocidad. Quieto suaviza mucho
+    (sin temblor), rápido casi no filtra (sin retraso). `mincutoff` en Hz, `beta` cuánto abre con la velocidad."""
+
+    def __init__(self, mincutoff=1.0, beta=0.0, dcutoff=1.0):
+        self.mincutoff, self.beta, self.dcutoff = mincutoff, beta, dcutoff
+        self.reset()
+
+    def reset(self):
+        self.x = self.dx = None
+        self.t = None
+
+    @staticmethod
+    def _alpha(cutoff, dt):
+        tau = 1.0 / (2 * math.pi * cutoff)
+        return 1.0 / (1.0 + tau / dt)
+
+    def __call__(self, x, t):
+        if self.x is None or self.t is None or t <= self.t:
+            self.x, self.dx, self.t = x, 0.0, t
+            return x
+        dt = t - self.t
+        self.t = t
+        dx = (x - self.x) / dt
+        a_d = self._alpha(self.dcutoff, dt)
+        self.dx = a_d * dx + (1 - a_d) * self.dx
+        cutoff = self.mincutoff + self.beta * abs(self.dx)
+        a = self._alpha(cutoff, dt)
+        self.x = a * x + (1 - a) * self.x
+        return self.x
+
+
 class Pen:
     """Lápiz virtual mapeado al mismo monitor que Mouse. Estado: fuera de alcance -> en alcance (hover) -> en contacto.
     Cada método inyecta un evento coherente con el estado anterior (Windows rechaza secuencias inválidas)."""
@@ -304,6 +413,11 @@ class Pen:
         # Wacom para la misma presión), >1 más duro. Como la curva del driver de Wacom, pero global.
         self.gamma = float(os.environ.get("PEN_GAMMA", "0.8"))
         self.min_pressure = float(os.environ.get("PEN_MIN", "0.02"))   # umbral de activación en contacto
+        # Suavizado 0..1 (0 = apagado) con filtro 1€ sobre posición y presión; el iPad lo cambia con "pencfg".
+        self.smooth = 0.0
+        self._fx, self._fy, self._fp = OneEuro(), OneEuro(), OneEuro()
+        self.configure(smooth=float(os.environ.get("PEN_SMOOTH", "0")))
+        self.raw_pressure = 0.0   # última presión cruda del iPad (para el HUD/estado)
         self.available = pen_supported()
         if self.available:
             user32.CreateSyntheticPointerDevice.restype = ctypes.c_void_p
@@ -329,6 +443,38 @@ class Pen:
     def curve(self, p):
         p = max(0.0, min(1.0, float(p or 0)))
         return p ** self.gamma if p > 0 else 0.0
+
+    def configure(self, gamma=None, min_pressure=None, smooth=None):
+        """Curva, umbral y suavizado en caliente (mensaje "pencfg" del iPad). Valores fuera de rango se recortan.
+        smooth 0 = sin filtro; 1 = corte de 0.6 Hz en reposo (muy suave, se nota el retraso en trazos lentos)."""
+        if gamma is not None:
+            self.gamma = max(0.2, min(3.0, float(gamma)))
+        if min_pressure is not None:
+            self.min_pressure = max(0.0, min(0.5, float(min_pressure)))
+        if smooth is not None:
+            self.smooth = max(0.0, min(1.0, float(smooth)))
+            # Frecuencia de corte en reposo: 12 Hz (apenas quita temblor) -> 0.6 Hz. beta abre el filtro con la
+            # velocidad (en pantallas/s): a 0.5 pantallas/s suma ~4 Hz, así los trazos rápidos no se retrasan.
+            fc = 12.0 * (1.0 - self.smooth) ** 2 + 0.6
+            for f in (self._fx, self._fy):
+                f.mincutoff, f.beta = fc, 8.0
+            self._fp.mincutoff, self._fp.beta = fc * 1.5, 2.0
+        self._reset_filters()
+        log.info("lápiz: gamma %.2f, mínimo %.3f, suavizado %.2f", self.gamma, self.min_pressure, self.smooth)
+
+    def _reset_filters(self):
+        for f in (self._fx, self._fy, self._fp):
+            f.reset()
+
+    def _filter(self, nx, ny, p, t):
+        """Posición y presión filtradas (si smooth > 0). t: segundos monotónicos del punto."""
+        self.raw_pressure = float(p or 0.0)
+        if self.smooth <= 0:
+            return nx, ny, p
+        t = time.monotonic() if t is None else t
+        fx, fy = self._fx(float(nx), t), self._fy(float(ny), t)
+        fp = self._fp(float(p), t) if p is not None else None
+        return fx, fy, fp
 
     def _inject(self, flags, nx, ny, p=0.0, tx=0, ty=0):
         px, py = self.mouse.pixel(nx, ny)
@@ -373,9 +519,11 @@ class Pen:
         self.inrange = True
         self._inject(flags, nx, ny, 0.0, tx, ty)
 
-    def down(self, nx, ny, p=0.0, tx=0, ty=0):
+    def down(self, nx, ny, p=0.0, tx=0, ty=0, t=None):
         if self.contact:
-            return self.move(nx, ny, p, tx, ty)
+            return self.move(nx, ny, p, tx, ty, t)
+        self._reset_filters()                       # cada trazo arranca en el punto real, sin arrastre del anterior
+        nx, ny, p = self._filter(nx, ny, p, t)
         if not self.inrange:
             # Sin hover (iPad sin detección de Pencil en el aire): entrar en alcance justo antes de tocar.
             self._inject(PF_INRANGE | PF_UPDATE | PF_PRIMARY, nx, ny, 0.0, tx, ty)
@@ -386,9 +534,10 @@ class Pen:
         if not self._inject(flags, nx, ny, self.pressure, tx, ty):
             self.contact = False
 
-    def move(self, nx, ny, p=None, tx=0, ty=0):
+    def move(self, nx, ny, p=None, tx=0, ty=0, t=None):
         if not self.contact:
             return self.hover(nx, ny, tx, ty)
+        nx, ny, p = self._filter(nx, ny, p, t)
         if p is not None:
             self.pressure = max(self.min_pressure, self.curve(p))
         flags = PF_INRANGE | PF_INCONTACT | PF_UPDATE | PF_PRIMARY | self._buttons()
@@ -397,8 +546,10 @@ class Pen:
     def up(self, nx, ny, tx=0, ty=0):
         if not self.contact:
             return
+        if self.smooth > 0 and self._fx.x is not None:
+            nx, ny = self._fx.x, self._fy.x        # levantar donde quedó el trazo filtrado, sin salto final
         self.contact = False
-        self.pressure = 0.0
+        self.pressure = self.raw_pressure = 0.0
         flags = PF_INRANGE | PF_UP | PF_PRIMARY | self._buttons()
         self._inject(flags, nx, ny, 0.0, tx, ty)
 
@@ -430,3 +581,4 @@ if __name__ == "__main__":
     print("monitores:", monitors())
     print("objetivo:", target_display())
     print("lápiz virtual:", "disponible" if pen_supported() else "NO disponible (Windows 10 1809+)")
+    print("app activa:", foreground_app())
