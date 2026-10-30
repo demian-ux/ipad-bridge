@@ -1,0 +1,126 @@
+{
+  "_": [
+    "Barra de atajos y gestos del iPad (ipad.html la carga al abrir; recargá la página para ver cambios).",
+    "Tipos de botón: key (pulsa 'keys'), mod (mantiene 'key' mientras se toca: shift/ctrl/alt/space/win),",
+    "mouse (botón del mouse 1 = medio, 2 = derecho: mantenido, el Pencil actúa como ese botón; tocado solo, hace clic),",
+    "toggle (alterna dos atajos: keys[0] al primer toque, keys[1] al siguiente; labels opcionales), sep (separador).",
+    "Nombres de teclas: letras, dígitos, f1-f24, [, ], esc, tab, space, enter, backspace, delete, insert, home, end,",
+    "pageup, pagedown, left/right/up/down, num0-num9, num+ num- num* num/ num., ctrl/shift/alt/win como modificadores.",
+    "Gestos (dedos; 'hold' = dedos apoyados antes de que toque el Pencil, mientras dure el dedo): tap1 clic,",
+    "tap2/tap3 atajos, hold1/hold2/hold3 = toggle (keys[0] al tocar el Pencil, keys[1] al levantar el dedo), mod o mouse.",
+    "palmRadius: dedos a menos de esos px (CSS) de donde cae el Pencil son palma, no gesto. palmSize: contacto mayor = palma.",
+    "Cada perfil se elige por el ejecutable de la ventana activa en Windows ('match', sin distinguir mayúsculas);",
+    "puede traer sus propios 'gestures' (se mezclan con los generales). El primer perfil es el de respaldo."
+  ],
+  "gestures": {
+    "tapMs": 250,
+    "doubleMs": 300,
+    "tapPx": 10,
+    "palmRadius": 180,
+    "palmSize": 45,
+    "tap1": {"type": "click", "btn": 0},
+    "tap2": {"type": "key", "keys": "ctrl+z"},
+    "tap3": {"type": "key", "keys": "ctrl+y"},
+    "hold1": {"type": "toggle", "keys": ["e", "b"]},
+    "hold2": {"type": "mouse", "btn": 1},
+    "hold3": {"type": "mouse", "btn": 2}
+  },
+  "profiles": [
+    {
+      "id": "generic", "name": "Genérico", "short": "···", "match": [],
+      "buttons": [
+        {"type": "mod", "key": "shift", "label": "⇧", "caption": "shift"},
+        {"type": "mod", "key": "ctrl", "label": "⌃", "caption": "ctrl"},
+        {"type": "mod", "key": "alt", "label": "⌥", "caption": "alt"},
+        {"type": "mod", "key": "space", "label": "␣", "caption": "esp"},
+        {"type": "sep"},
+        {"type": "key", "keys": "ctrl+z", "label": "↶", "caption": "deshacer"},
+        {"type": "key", "keys": "ctrl+y", "label": "↷", "caption": "rehacer"},
+        {"type": "key", "keys": "ctrl+s", "label": "💾", "caption": "guardar"},
+        {"type": "mouse", "btn": 2, "label": "◨", "caption": "derecho"},
+        {"type": "mouse", "btn": 1, "label": "◫", "caption": "medio"},
+        {"type": "key", "keys": "esc", "label": "esc", "caption": "escape"},
+        {"type": "key", "keys": "enter", "label": "⏎", "caption": "intro"}
+      ]
+    },
+    {
+      "id": "photoshop", "name": "Photoshop", "short": "Ps", "match": ["photoshop.exe"],
+      "gestures": {"tap3": {"type": "key", "keys": "ctrl+shift+z"}},
+      "buttons": [
+        {"type": "mod", "key": "shift", "label": "⇧", "caption": "shift"},
+        {"type": "mod", "key": "ctrl", "label": "⌃", "caption": "ctrl"},
+        {"type": "mod", "key": "alt", "label": "⌥", "caption": "alt"},
+        {"type": "mod", "key": "space", "label": "␣", "caption": "mano"},
+        {"type": "sep"},
+        {"type": "key", "keys": "ctrl+z", "label": "↶", "caption": "deshacer"},
+        {"type": "key", "keys": "ctrl+shift+z", "label": "↷", "caption": "rehacer"},
+        {"type": "key", "keys": "[", "label": "[", "caption": "pincel −"},
+        {"type": "key", "keys": "]", "label": "]", "caption": "pincel +"},
+        {"type": "toggle", "keys": ["e", "b"], "labels": ["E", "B"], "caption": "goma/pincel"},
+        {"type": "mouse", "btn": 2, "label": "◨", "caption": "pinceles"},
+        {"type": "key", "keys": "ctrl+0", "label": "⊡", "caption": "ajustar"},
+        {"type": "key", "keys": "x", "label": "X", "caption": "colores"},
+        {"type": "key", "keys": "ctrl+d", "label": "⌫", "caption": "deselec."}
+      ]
+    },
+    {
+      "id": "krita", "name": "Krita", "short": "Kr", "match": ["krita.exe"],
+      "gestures": {"tap3": {"type": "key", "keys": "ctrl+shift+z"}, "hold1": {"type": "toggle", "keys": ["e", "e"]}},
+      "buttons": [
+        {"type": "mod", "key": "shift", "label": "⇧", "caption": "tamaño"},
+        {"type": "mod", "key": "ctrl", "label": "⌃", "caption": "color"},
+        {"type": "mod", "key": "alt", "label": "⌥", "caption": "alt"},
+        {"type": "mod", "key": "space", "label": "␣", "caption": "mano"},
+        {"type": "sep"},
+        {"type": "key", "keys": "ctrl+z", "label": "↶", "caption": "deshacer"},
+        {"type": "key", "keys": "ctrl+shift+z", "label": "↷", "caption": "rehacer"},
+        {"type": "key", "keys": "[", "label": "[", "caption": "pincel −"},
+        {"type": "key", "keys": "]", "label": "]", "caption": "pincel +"},
+        {"type": "toggle", "keys": ["e", "e"], "labels": ["E", "✎"], "caption": "goma"},
+        {"type": "mouse", "btn": 1, "label": "◫", "caption": "mover"},
+        {"type": "key", "keys": "m", "label": "M", "caption": "espejo"},
+        {"type": "key", "keys": "5", "label": "⟲", "caption": "sin rotar"},
+        {"type": "key", "keys": "ctrl+shift+a", "label": "⌫", "caption": "deselec."}
+      ]
+    },
+    {
+      "id": "clipstudio", "name": "Clip Studio", "short": "Cs", "match": ["clipstudiopaint.exe", "clipstudio.exe"],
+      "gestures": {"hold1": {"type": "toggle", "keys": ["e", "p"]}},
+      "buttons": [
+        {"type": "mod", "key": "shift", "label": "⇧", "caption": "shift"},
+        {"type": "mod", "key": "ctrl", "label": "⌃", "caption": "ctrl"},
+        {"type": "mod", "key": "alt", "label": "⌥", "caption": "cuentag."},
+        {"type": "mod", "key": "space", "label": "␣", "caption": "mano"},
+        {"type": "sep"},
+        {"type": "key", "keys": "ctrl+z", "label": "↶", "caption": "deshacer"},
+        {"type": "key", "keys": "ctrl+y", "label": "↷", "caption": "rehacer"},
+        {"type": "key", "keys": "[", "label": "[", "caption": "pincel −"},
+        {"type": "key", "keys": "]", "label": "]", "caption": "pincel +"},
+        {"type": "toggle", "keys": ["e", "p"], "labels": ["E", "P"], "caption": "goma/pluma"},
+        {"type": "key", "keys": "b", "label": "B", "caption": "pincel"},
+        {"type": "mouse", "btn": 2, "label": "◨", "caption": "derecho"},
+        {"type": "key", "keys": "ctrl+shift+e", "label": "⟲", "caption": "rotar 0"},
+        {"type": "key", "keys": "ctrl+d", "label": "⌫", "caption": "deselec."}
+      ]
+    },
+    {
+      "id": "blender", "name": "Blender", "short": "Bl", "match": ["blender.exe"],
+      "gestures": {"tap3": {"type": "key", "keys": "ctrl+shift+z"}, "hold1": {"type": "mod", "key": "ctrl"}},
+      "buttons": [
+        {"type": "mod", "key": "shift", "label": "⇧", "caption": "shift"},
+        {"type": "mod", "key": "ctrl", "label": "⌃", "caption": "invertir"},
+        {"type": "mod", "key": "alt", "label": "⌥", "caption": "alt"},
+        {"type": "sep"},
+        {"type": "key", "keys": "ctrl+z", "label": "↶", "caption": "deshacer"},
+        {"type": "key", "keys": "ctrl+shift+z", "label": "↷", "caption": "rehacer"},
+        {"type": "mouse", "btn": 1, "label": "◫", "caption": "orbitar"},
+        {"type": "key", "keys": "f", "label": "F", "caption": "radio"},
+        {"type": "key", "keys": "shift+f", "label": "⇧F", "caption": "fuerza"},
+        {"type": "key", "keys": "tab", "label": "⇥", "caption": "modo"},
+        {"type": "key", "keys": "num.", "label": "⊙", "caption": "encuadrar"},
+        {"type": "key", "keys": "ctrl+space", "label": "⛶", "caption": "maximizar"},
+        {"type": "key", "keys": "ctrl+s", "label": "💾", "caption": "guardar"}
+      ]
+    }
+  ]
+}

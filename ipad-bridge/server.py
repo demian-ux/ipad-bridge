@@ -7,6 +7,7 @@ Mensajes a los visores:
   JSON   {"type":"still-clear"}                      -> volver a mostrar el video
   binario u8 0|1 (delta|key) + f64 ts + muestra HEVC (NALs con largo de 4 bytes)
   binario u8 2 + PNG                                 -> imagen fija sin pérdida
+  JSON   {"type":"app", exe, title}                  -> ventana activa de Windows (barra de atajos por aplicación)
 """
 import asyncio
 import base64
@@ -26,7 +27,7 @@ from pathlib import Path
 from aiohttp import web, WSMsgType
 
 import hevc
-from winput import Mouse, Pen, hold_key, release_keys, tap_keys, target_display, tilt_from_angles
+from winput import Mouse, Pen, foreground_app, hold_key, release_keys, tap_keys, target_display, tilt_from_angles, type_text
 
 STATIC = Path(__file__).parent / "static"
 CERTS = Path(__file__).parent / "certs"
@@ -374,12 +375,19 @@ def handle_pen(m):
             return handle_mouse(m)
         return
     if ev == "moves":
-        for pt in m["pts"]:                 # trayectoria completa (toques coalescidos, hasta 240 Hz)
+        pts = m["pts"]
+        # Los puntos coalescidos no traen hora: repartirlos entre el evento anterior y ahora (para el filtro 1€).
+        now = time.monotonic()
+        t0 = max(pen.last, now - 0.1)
+        for i, pt in enumerate(pts):        # trayectoria completa (toques coalescidos, hasta 240 Hz)
             x, y, p = pt[0], pt[1], pt[2] if len(pt) > 2 else None
             tx, ty = (int(pt[3]), int(pt[4])) if len(pt) > 4 else (0, 0)
-            pen.move(x, y, p, tx, ty)
+            pen.move(x, y, p, tx, ty, t0 + (now - t0) * (i + 1) / len(pts))
     elif ev == "move":
         pen.move(m["x"], m["y"], m.get("p"), *_tilt(m))
+    elif ev == "pencfg":
+        # Curva de presión y suavizado desde el panel del iPad; se aplica en caliente, sin reiniciar.
+        pen.configure(gamma=m.get("gamma"), min_pressure=m.get("min"), smooth=m.get("smooth"))
     elif ev == "hover":
         pen.hover(m["x"], m["y"], *_tilt(m))
     elif ev == "down":
@@ -408,11 +416,13 @@ def handle_mouse(m):
     if ev == "move":
         mouse.move(m["x"], m["y"])
     elif ev == "down":
-        mouse.move(m["x"], m["y"])
-        mouse.down(m.get("btn", 0))
+        if "x" in m:                         # sin coordenadas: botón en la posición actual del cursor (barra)
+            mouse.move(m["x"], m["y"])
+        mouse.down(int(m.get("btn", 0)))
     elif ev == "up":
-        mouse.move(m["x"], m["y"])
-        mouse.up(m.get("btn", 0))
+        if "x" in m:
+            mouse.move(m["x"], m["y"])
+        mouse.up(int(m.get("btn", 0)))
     elif ev == "scroll":
         mouse.scroll(dy=m.get("dy", 0), dx=m.get("dx", 0))
 
@@ -422,12 +432,15 @@ MOD_KEYS = ("shift", "ctrl", "alt", "space", "win")
 
 def handle_keys(m):
     """Barra lateral de teclas (estilo ExpressKeys): {"ev":"key","keys":"ctrl+z"} pulsa un atajo;
-    {"ev":"mod","key":"shift","down":true|false} mantiene un modificador mientras se toca el botón.
+    {"ev":"mod","key":"shift","down":true|false} mantiene un modificador mientras se toca el botón;
+    {"ev":"text","text":"hola"} escribe texto tal cual (teclado en pantalla del iPad).
     Van antes que handle_mouse: se usan justamente mientras el Pencil está en contacto."""
     ev = m.get("ev")
     try:
         if ev == "key":
             tap_keys(str(m.get("keys", "")))
+        elif ev == "text":
+            type_text(str(m.get("text", ""))[:200])
         elif ev == "mod":
             key = str(m.get("key", "")).lower()
             if key not in MOD_KEYS:
@@ -439,12 +452,40 @@ def handle_keys(m):
 
 def handle_input(m):
     ev = m.get("ev")
-    if ev in ("key", "mod"):
+    if ev in ("key", "mod", "text"):
         handle_keys(m)
-    elif m.get("pen"):
+    elif m.get("pen") or ev == "pencfg":
         handle_pen(m)
     else:
         handle_mouse(m)
+
+
+# ---------------------------------------------------------------- ventana activa -> perfil de la barra del iPad
+
+app_state = {"exe": "", "title": ""}
+
+
+def app_msg():
+    return {"type": "app", "exe": app_state["exe"], "title": app_state["title"]}
+
+
+async def app_loop():
+    """Cada 0.5 s mira la ventana activa de Windows; si cambió el ejecutable manda {"type":"app"} a los visores,
+    que eligen el perfil de la barra de atajos (shortcuts.json)."""
+    while True:
+        await asyncio.sleep(0.5)
+        if not state["ipads"]:
+            continue
+        try:
+            exe, title = foreground_app()
+        except OSError:
+            continue
+        if not exe:                          # sin ventana activa (escritorio, bloqueo): dejar el perfil que estaba
+            continue
+        if exe != app_state["exe"]:
+            app_state.update(exe=exe, title=title)
+            log.info("app activa: %s (%s)", exe, title[:60])
+            await send_ipads(app_msg())
 
 
 async def ws_handler(request):
@@ -469,6 +510,14 @@ async def ws_handler(request):
                         await send(ws, capture.config_msg)
                     if stills.current_png is not None:
                         await ws.send_bytes(b"\x02" + stills.current_png)
+                    try:                      # perfil de la barra: la ventana activa ahora mismo
+                        exe, title = foreground_app()
+                        if exe:
+                            app_state.update(exe=exe, title=title)
+                    except OSError:
+                        pass
+                    if app_state["exe"]:
+                        await send(ws, app_msg())
                 else:
                     await send(ws, {"type": "info", "ipad_url": https_url("/ipad.html"), "setup_url": http_url("/"),
                                     "target": target_info()})
@@ -555,9 +604,10 @@ async def main():
     print(f"  iPad (1ª vez):    {http_url('/')}   <- instalar certificado")
     print(f"  iPad (pantalla):  {https_url('/ipad.html') if tls else http_url('/ipad.html')}")
     print(f"  Monitor objetivo: {t['name']} {t['width']}x{t['height']} @ {t['hz']} Hz ({'virtual' if t['virtual'] else 'SIN monitor virtual: espejo'})")
-    print(f"  Pencil:           {'lápiz virtual con presión (gamma %.2f)' % pen.gamma if pen.available else 'mouse (sin presión: Windows sin pointer injection)'}")
+    print(f"  Pencil:           {'lápiz virtual con presión (gamma %.2f, suavizado %.1f; el iPad los cambia desde su panel)' % (pen.gamma, pen.smooth) if pen.available else 'mouse (sin presión: Windows sin pointer injection)'}")
     print("=" * 60, flush=True)
     asyncio.create_task(status_loop())
+    asyncio.create_task(app_loop())
     while True:
         await asyncio.sleep(3600)
 
