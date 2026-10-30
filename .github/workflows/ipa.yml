@@ -1,0 +1,181 @@
+# Compila la app nativa del iPad (ipad-bridge/app/iPadBridge.swiftpm) en un Mac de GitHub Actions y deja un IPA sin
+# firmar: iPadBridge.ipa (+ iPadBridge.json con versión, commit y hash) como artifact de cada corrida y, en los tags
+# v*, como assets de un Release junto con source.json, una fuente de SideStore/AltStore que apunta al IPA del release.
+# En la PC, tools/install_ipa.ps1 baja el último IPA y lo sirve al iPad, que lo firma e instala con SideStore y un
+# Apple ID gratuito (README, "App nativa: instalar desde el IPA").
+name: IPA de la app del iPad
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+    paths:
+      - "ipad-bridge/app/**"
+      - ".github/workflows/ipa.yml"
+  pull_request:
+    paths:
+      - "ipad-bridge/app/**"
+      - ".github/workflows/ipa.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write   # subir el IPA al Release del tag
+
+jobs:
+  ipa:
+    name: Compilar iPadBridge.ipa
+    runs-on: macos-latest
+    timeout-minutes: 40
+    env:
+      APP_DIR: ipad-bridge/app/iPadBridge.swiftpm
+      DERIVED: ${{ github.workspace }}/build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xcode disponible
+        run: |
+          xcode-select -p
+          xcodebuild -version
+          swift --version
+
+      - name: Versión del build
+        # Tag v1.2.3 -> 1.2.3; cualquier otro push -> 0.0.<número de corrida>. El bundleVersion es el número de corrida,
+        # así cada IPA es distinto para SideStore (actualiza cuando cambia la versión) y se sabe de qué commit salió.
+        run: |
+          set -e
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then VERSION="${GITHUB_REF#refs/tags/v}"; else VERSION="0.0.${GITHUB_RUN_NUMBER}"; fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "BUILD=${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+          sed -i '' -E "s/displayVersion: \"[^\"]*\"/displayVersion: \"$VERSION\"/; s/bundleVersion: \"[^\"]*\"/bundleVersion: \"${GITHUB_RUN_NUMBER}\"/" "$APP_DIR/Package.swift"
+          grep -E "displayVersion|bundleVersion" "$APP_DIR/Package.swift"
+
+      - name: Compilar (iphoneos, Release, sin firma)
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          set -o pipefail
+          # El paquete .swiftpm (AppleProductTypes) se abre como proyecto; el esquema es el nombre del producto.
+          xcodebuild -list
+          # -quiet: solo avisos y errores (el log completo queda en build-xcodebuild.log, se muestra si falla).
+          xcodebuild -quiet build \
+            -scheme iPadBridge \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$DERIVED" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            ONLY_ACTIVE_ARCH=NO \
+            2>&1 | tee "$DERIVED-xcodebuild.log"
+
+      - name: Log completo de xcodebuild (si falló)
+        if: failure()
+        run: tail -n 200 "$DERIVED-xcodebuild.log" || true
+
+      - name: Empaquetar el IPA
+        run: |
+          set -e
+          APP="$(find "$DERIVED/Build/Products" -maxdepth 2 -name "iPadBridge.app" -type d | head -n 1)"
+          test -n "$APP" || { echo "no apareció iPadBridge.app en $DERIVED/Build/Products"; ls -R "$DERIVED/Build/Products" | head -n 50; exit 1; }
+          echo "App: $APP"
+          /usr/libexec/PlistBuddy -c "Print" "$APP/Info.plist" | grep -E "CFBundle(Identifier|ShortVersionString|Version|Executable)|MinimumOSVersion|UIDeviceFamily" || true
+          BUNDLE_ID="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist")"
+          MIN_OS="$(/usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$APP/Info.plist" 2>/dev/null || echo 16.0)"
+          rm -rf out && mkdir -p out/Payload
+          cp -R "$APP" out/Payload/
+          (cd out && zip -qry iPadBridge.ipa Payload)
+          SIZE="$(stat -f %z out/iPadBridge.ipa)"
+          SHA="$(shasum -a 256 out/iPadBridge.ipa | cut -d' ' -f1)"
+          DATE="$(date -u +%Y-%m-%d)"
+          ls -la out/iPadBridge.ipa
+          # Metadatos que lee tools/install_ipa.ps1 (versión, commit, tamaño, hash).
+          cat > out/iPadBridge.json <<EOF
+          {
+            "name": "iPadBridge.ipa",
+            "version": "$VERSION",
+            "build": "$BUILD",
+            "bundleIdentifier": "$BUNDLE_ID",
+            "minOSVersion": "$MIN_OS",
+            "commit": "$GITHUB_SHA",
+            "ref": "$GITHUB_REF_NAME",
+            "date": "$DATE",
+            "size": $SIZE,
+            "sha256": "$SHA",
+            "run": "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          }
+          EOF
+          cat out/iPadBridge.json
+          echo "BUNDLE_ID=$BUNDLE_ID" >> "$GITHUB_ENV"
+          echo "MIN_OS=$MIN_OS" >> "$GITHUB_ENV"
+          echo "SIZE=$SIZE" >> "$GITHUB_ENV"
+          echo "DATE=$DATE" >> "$GITHUB_ENV"
+
+      - name: Fuente de SideStore (solo tags v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        # https://github.com/<repo>/releases/latest/download/source.json es una URL estable: se agrega una vez en
+        # SideStore (o AltStore) y cada release nuevo aparece como actualización de la app.
+        run: |
+          set -e
+          REPO_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}"
+          cat > out/source.json <<EOF
+          {
+            "name": "iPad Bridge",
+            "identifier": "${BUNDLE_ID}.source",
+            "subtitle": "El iPad como pantalla extendida de Windows con Apple Pencil",
+            "description": "Compilado por GitHub Actions desde ${REPO_URL}. Sin firmar: SideStore/AltStore lo firma con tu Apple ID.",
+            "website": "${REPO_URL}",
+            "apps": [
+              {
+                "name": "iPad Bridge",
+                "bundleIdentifier": "${BUNDLE_ID}",
+                "developerName": "Demian Szklarski",
+                "subtitle": "Pantalla extendida de Windows con Apple Pencil",
+                "localizedDescription": "Recibe la pantalla de la PC por USB o red y manda el Pencil y los toques. Requiere el servidor iPad Bridge en Windows (${REPO_URL}).",
+                "iconURL": "${RAW}/ipad-bridge/static/app-icon.png",
+                "tintColor": "#4c8dff",
+                "category": "utilities",
+                "versions": [
+                  {
+                    "version": "${VERSION}",
+                    "buildVersion": "${BUILD}",
+                    "date": "${DATE}",
+                    "localizedDescription": "${REPO_URL}/releases/tag/${GITHUB_REF_NAME}",
+                    "downloadURL": "${REPO_URL}/releases/download/${GITHUB_REF_NAME}/iPadBridge.ipa",
+                    "size": ${SIZE},
+                    "minOSVersion": "${MIN_OS}"
+                  }
+                ],
+                "appPermissions": {
+                  "entitlements": [],
+                  "privacy": {
+                    "NSLocalNetworkUsageDescription": "Recibe la pantalla de la PC por cable o red local"
+                  }
+                }
+              }
+            ]
+          }
+          EOF
+          python3 -m json.tool out/source.json > /dev/null
+          cat out/source.json
+
+      - name: Subir artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iPadBridge-ipa-${{ env.VERSION }}
+          path: |
+            out/iPadBridge.ipa
+            out/iPadBridge.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Release (solo tags v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            out/iPadBridge.ipa
+            out/iPadBridge.json
+            out/source.json
+          generate_release_notes: true

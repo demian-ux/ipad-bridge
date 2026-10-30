@@ -25,3 +25,8 @@ ipad-bridge/installer/out/
 # salida de tools/fake_app.py
 ipad-bridge/fake_*.bin
 ipad-bridge/fake_*.png
+
+# IPA bajado por tools/install_ipa.ps1 y la fuente de SideStore que genera (se sirven desde static/)
+ipad-bridge/static/iPadBridge.ipa
+ipad-bridge/static/iPadBridge.json
+ipad-bridge/static/sidestore.json

@@ -115,12 +115,78 @@ Si la IP de la PC cambia, `start.ps1` reemite el certificado del servidor solo; 
   NVENC no sostiene 2732x2048 HEVC 10b a 120 fps con movimiento real y el video se traba.
 - iPad: abrí http://192.168.1.15/ y seguí los pasos: instalar el certificado (perfil) y activar su confianza en
   Ajustes > General > Información > Ajustes de confianza de certificados. WebCodecs solo existe en https.
-- App nativa (opcional, para cable): desde esa misma página bajá iPadBridge.swiftpm.zip (el servidor lo regenera al
-  arrancar si cambiaron las fuentes), descomprimilo en Archivos y abrilo con Swift Playgrounds. Escucha TCP en 7777;
-  `usb_bridge.py` la conecta al servidor por IP o por USB (USB requiere la app "Dispositivos Apple" de Microsoft
-  Store). Por red la app lista las PCs que publican `_ipadbridge._tcp` por mDNS; tocar una le pide por http
+- App nativa (opcional, para cable): se instala desde el IPA que compila GitHub Actions, firmado en el iPad con
+  SideStore y un Apple ID gratuito (sección "App nativa: instalar desde el IPA"); la alternativa sin Apple ID en la
+  PC es bajar iPadBridge.swiftpm.zip de esa misma página, descomprimirlo en Archivos y abrirlo con Swift
+  Playgrounds. Escucha TCP en 7777; `usb_bridge.py` la conecta al servidor por IP o por USB (USB requiere la app
+  "Dispositivos Apple" de Microsoft Store). Por red la app lista las PCs que publican `_ipadbridge._tcp` por mDNS; tocar una le pide por http
   (`/connect`) que su puente se conecte al iPad, con el código la primera vez (la app guarda el token por PC). Si no
   hay Bonjour en esa red, se escribe la IP de la PC a mano.
+
+## App nativa: instalar desde el IPA
+
+La app del iPad (`app/iPadBridge.swiftpm`) se compila sin Mac: cada push que toque `ipad-bridge/app/` corre
+`.github/workflows/ipa.yml` en un runner macOS de GitHub Actions, que abre el paquete con `xcodebuild`, compila en
+Release para iphoneos sin firmar y deja `iPadBridge.ipa` (+ `iPadBridge.json`: versión, commit, SHA-256) como artifact
+de la corrida (30 días). Un tag `v*` además publica un Release con el IPA y `source.json`, una fuente de SideStore.
+La versión del IPA es el tag sin la `v` o, en builds de rama, `0.0.<número de corrida>`, así SideStore ve cada build
+como una actualización. La firma la pone el iPad: SideStore firma el IPA con un Apple ID gratuito (certificado de
+desarrollo de 7 días, 3 apps por cuenta contando SideStore, 10 App IDs por semana) y se renueva solo.
+
+Por qué SideStore y no AltServer o Sideloadly: en Windows todos hablan con el iPad a través del servicio usbmux de
+Apple (Apple Mobile Device Service, puerto 27015), el mismo que usa `usb_bridge.py`. AltServer y Sideloadly exigen
+instalar iTunes e iCloud "clásicos" de apple.com (no los de la Microsoft Store), y ese iTunes trae su propio Apple
+Mobile Device Support que pelea con el de la app Dispositivos Apple, de la que depende el puente USB. iloader, el
+instalador de SideStore, usa el servicio que ya está (su documentación contempla la app Dispositivos Apple) y no
+instala nada de Apple; después SideStore firma, instala y renueva en el propio iPad, sin PC, con la VPN local
+LocalDevVPN. Ninguno de los dos tiene línea de comandos, pero no hace falta: la PC solo publica el IPA.
+
+### Primera vez (PC + iPad, unos 15 minutos)
+
+En la PC, sin tocar Dispositivos Apple ni instalar iTunes:
+1. Copia de seguridad de `C:\ProgramData\Apple\Lockdown` (los registros de emparejamiento USB del servicio usbmux,
+   por si el instalador los pisara; con la copia se restauran y el puente vuelve a ver el iPad).
+2. Bajá e instalá iloader: https://github.com/nab138/iloader/releases/latest (archivo `iloader-windows-x64.msi`).
+3. iPad por USB, desbloqueado, "Confiar en este ordenador". Cerrá iPad Bridge en la PC mientras tanto (bandeja → Salir),
+   para que el puente no esté usando el iPad.
+4. iloader → iniciar sesión con el Apple ID (el mail distingue mayúsculas; la verificación en dos pasos se pide una
+   vez) → elegir el iPad → "Install SideStore (Stable)". iloader deja además el archivo de emparejamiento que
+   SideStore necesita.
+
+En el iPad (iPadOS 17/18):
+5. Ajustes → General → VPN y administración de dispositivos → "Developer App" → tocar el Apple ID → Confiar (en
+   iPadOS 18, "Permitir y reiniciar", pide el código).
+6. Ajustes → Privacidad y seguridad → Modo desarrollador → activar (reinicia).
+7. App Store → LocalDevVPN (https://apps.apple.com/app/localdevvpn/id6755608044) → Connect → permitir la
+   configuración de VPN. Tiene que estar conectada al instalar y al renovar.
+8. SideStore → iniciar sesión con el mismo Apple ID → My Apps → tocar "7 DAYS" para renovar (aceptar si pide revocar o
+   crear el certificado).
+9. Agregar la fuente de iPad Bridge: SideStore → Sources → + → `https://github.com/<usuario>/ipad-bridge/releases/latest/download/source.json`
+   (los Releases) o `https://<IP de la PC>/sidestore.json` (el último build que bajó `install_ipa.ps1`, abajo). La app
+   aparece en Browse → Install. La primera vez el perfil del desarrollador vuelve a pedir confianza (paso 5).
+10. Abrir iPad Bridge. Como pidió el permiso de red local, la primera vez pregunta; aceptar.
+
+### Flujo diario
+
+1. Editar la app, push. GitHub → Actions → "IPA de la app del iPad" en verde (unos 5-10 minutos en el runner).
+2. En la PC, con el servidor corriendo:
+   `powershell -ExecutionPolicy Bypass -File C:\Users\dszkl\ipad-link\ipad-bridge\tools\install_ipa.ps1`
+   Baja el IPA de la última corrida verde de la rama actual (`-Branch main` para otra, `-Release` o `-Tag v0.2.0` para
+   un Release, `-Ipa archivo` para uno ya bajado), verifica el SHA-256, lo copia a `static\iPadBridge.ipa` y escribe
+   `static\sidestore.json` apuntando a `https://<IP de la PC>/iPadBridge.ipa`. Para los artifacts necesita un token
+   de GitHub: usa `gh auth token` si está GitHub CLI y, si no, el token que Git Credential Manager guardó al hacer
+   push desde esa PC. Los Releases de un repo público no necesitan token.
+3. En el iPad: SideStore → Sources → la fuente de esta PC muestra la versión nueva → Update (o Safari →
+   `https://<IP de la PC>/iPadBridge.ipa` → Descargar → compartir con SideStore). Si el iPad solo tiene el cable y no
+   comparte red con la PC, bajá el IPA del Release en GitHub con Safari y abrilo con SideStore.
+4. Renovación: SideStore renueva las apps en segundo plano con LocalDevVPN conectada; si venció (la app no abre),
+   SideStore → My Apps → tocar el contador. Un cambio de Apple ID o un restablecimiento del iPad obliga a repetir
+   iloader (el archivo de emparejamiento caduca).
+
+Para publicar una versión: `git tag v0.2.0 && git push origin v0.2.0`; la corrida del tag crea el Release con el IPA.
+Sin cuenta en GitHub: la alternativa sigue siendo Swift Playgrounds en el iPad con `static/iPadBridge.swiftpm.zip` (lo
+regenera `tools/make_app_zip.py`); el runner compila con las mismas fuentes, así que un error de compilación se ve
+igual en Actions que en Playgrounds.
 
 ## Pencil como tableta (lápiz virtual)
 
@@ -241,6 +307,11 @@ Pencil (presión 0.5) para probar la previsualización y el panel.
   `Keyboard.swift` teclado; `Discovery.swift` lista las PCs por Bonjour; `MyApp.swift` barra y pantalla.
   `usb_bridge.py`: su puente (USB por usbmux o red, migración en caliente, latido y reconexión; reenvía `app` y manda
   `shortcuts` al conectar).
+- `.github/workflows/ipa.yml`: compila la app en GitHub Actions (macOS, `xcodebuild`, sin firma) y publica
+  `iPadBridge.ipa` + `iPadBridge.json` como artifact y, en tags `v*`, como Release con `source.json` (fuente de
+  SideStore). `tools/install_ipa.ps1`: baja el último IPA (artifact o Release), verifica el hash, lo copia a `static/` y
+  escribe `static/sidestore.json` para que el iPad lo instale con SideStore. `static/app-icon.png`: icono para las
+  fuentes.
 - `tools/make_app_zip.py`: regenera `static/iPadBridge.swiftpm.zip` desde las fuentes de la app con rutas `/` (el
   `Compress-Archive` de PowerShell las escribe con `\` y Archivos del iPad no abre el paquete); `server.py` lo llama
   al arrancar si alguna fuente es más nueva que el zip. `--force` lo rehace siempre.
