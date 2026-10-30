@@ -9,7 +9,9 @@
  #s{background:transparent}
  #pad{position:fixed;inset:0;touch-action:none}
  #msg{position:fixed;left:0;right:0;top:40%;text-align:center;color:#999;font:20px system-ui;pointer-events:none}
- #hud{position:fixed;top:8px;right:12px;color:#6f6;font:12px ui-monospace,monospace;opacity:.7;pointer-events:none}
+ #hud{position:fixed;top:8px;right:12px;color:#6f6;font:12px ui-monospace,monospace;opacity:.7;pointer-events:auto;touch-action:none;
+      padding:2px 6px;border-radius:6px;background:rgba(0,0,0,.35);-webkit-tap-highlight-color:transparent;z-index:6}
+ #hud b{color:#ff6;font-weight:600}
  /* Barra de teclas (estilo ExpressKeys): tira vertical en un borde, encima del área de dibujo */
  #bar{position:fixed;top:50%;left:6px;transform:translateY(-50%);display:flex;flex-direction:column;gap:4px;padding:4px;
       background:rgba(0,0,0,.45);border:1px solid rgba(255,255,255,.12);border-radius:14px;touch-action:none;z-index:5}
@@ -51,11 +53,46 @@ const c=document.getElementById('c'), ctx=c.getContext('2d',{alpha:false,desynch
 const pad=document.getElementById('pad'), msg=document.getElementById('msg'), hud=document.getElementById('hud');
 let ws, vw=0, vh=0, decoder=null, waitingKey=true, dec={frames:0,t:performance.now()}, penHud='';
 
+// ---- Medición (ítem 0.1 del plan). Reloj sincronizado con el servidor estilo NTP: ping cada 2 s con nuestro reloj,
+// ---- el servidor responde pong con el mismo t y su reloj mt; offset = mt - (t + rtt/2), tomado de la muestra de menor
+// ---- RTT de las últimas 15. Cada frame trae ts (reloj del servidor al salir del encoder): e2e = ahora - ts. ----
+const clock={samples:[],offset:null,rtt:null,inp50:null,inp95:null,srv:{}};
+const serverNow=()=>performance.now()+clock.offset;
+let pingTimer=0, statsTimer=0;
+const meas={e2e:[],pres:[],presented:0,drops:0,dropsSincePing:0,bytes:0,lastTs:0};
+function sendPing(){
+  if(!ws||ws.readyState!==1)return;
+  ws.send(JSON.stringify({type:'ping',t:performance.now(),q:decoder?decoder.decodeQueueSize:0,d:meas.dropsSincePing,rtt:clock.rtt}));
+  meas.dropsSincePing=0;
+}
+function onPong(m){
+  const now=performance.now(), rtt=now-m.t;
+  if(!(rtt>=0&&rtt<2000))return;               // RTT inválido: descartar
+  clock.samples.push({rtt:rtt,offset:m.mt-(m.t+rtt/2)});
+  if(clock.samples.length>15)clock.samples.shift();
+  const best=clock.samples.reduce((a,b)=>b.rtt<a.rtt?b:a);
+  clock.offset=best.offset;clock.rtt=rtt;clock.inp50=m.inp50;clock.inp95=m.inp95;clock.srv=m;
+}
+// Preset de calidad (ítem 1.7): auto / dibujo (nitidez: nunca baja la escala) / movimiento (fps: nunca baja los fps).
+// Se cambia tocando el HUD; se recuerda y se manda al conectar.
+const MODES=[['auto','auto'],['draw','dibujo'],['motion','movimiento']];
+let qmode='auto';try{qmode=localStorage.qualityMode||'auto';}catch(e){}
+function sendQuality(){if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'quality',mode:qmode}));}
+hud.addEventListener('pointerdown',function(e){
+  e.preventDefault();e.stopPropagation();
+  const i=MODES.findIndex(m=>m[0]===qmode);qmode=MODES[(i+1)%MODES.length][0];
+  try{localStorage.qualityMode=qmode;}catch(err){}
+  sendQuality();updateHud();
+});
+
 function connectWS(){
   ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws');
   ws.binaryType='arraybuffer';
-  ws.onopen=()=>{ws.send(JSON.stringify({type:'hello',role:'ipad'}));msg.textContent='Esperando que la PC comparta pantalla…';};
-  ws.onclose=()=>{msg.textContent='Sin conexión con la PC, reintentando…';setTimeout(connectWS,1500);};
+  ws.onopen=()=>{ws.send(JSON.stringify({type:'hello',role:'ipad'}));msg.textContent='Esperando que la PC comparta pantalla…';
+    sendQuality();
+    clock.samples=[];clock.offset=null;sendPing();clearInterval(pingTimer);pingTimer=setInterval(sendPing,2000);
+    clearInterval(statsTimer);statsTimer=setInterval(sendStats,5000);};
+  ws.onclose=()=>{msg.textContent='Sin conexión con la PC, reintentando…';clearInterval(pingTimer);clearInterval(statsTimer);setTimeout(connectWS,1500);};
   ws.onmessage=async e=>{
     if(e.data instanceof ArrayBuffer){
       if(new Uint8Array(e.data,0,1)[0]===2)showStill(e.data.slice(1));else onVideoChunk(e.data);
@@ -63,6 +100,7 @@ function connectWS(){
     const m=JSON.parse(e.data);
     if(m.type==='vconfig')await setupDecoder(m);
     if(m.type==='still-clear'){stillSeq++;sc.hidden=true;}
+    if(m.type==='pong')onPong(m);
   };
 }
 
@@ -90,25 +128,70 @@ async function setupDecoder(m){
   if(decoder){try{decoder.close();}catch(e){}}
   const cfg={codec:m.codec,optimizeForLatency:true};
   if(m.description)cfg.description=b64dec(m.description);
+  // Mientras se configura, los chunks que llegan (el IDR viene pegado al vconfig) se guardan en vez de perderse.
+  configuring=true;pending=[];
   const sup=await VideoDecoder.isConfigSupported(cfg);
-  if(!sup.supported){msg.textContent='Safari no decodifica '+m.codec;return;}
+  if(!sup.supported){msg.textContent='Safari no decodifica '+m.codec;configuring=false;return;}
   vw=m.width;vh=m.height;c.width=vw;c.height=vh;
   decoder=new VideoDecoder({
-    output:frame=>{ctx.drawImage(frame,0,0,c.width,c.height);frame.close();dec.frames++;msg.textContent='';},
-    error:e=>{msg.textContent='decoder: '+e.message;waitingKey=true;ws.send(JSON.stringify({type:'need-key'}));}
+    output:frame=>{
+      ctx.drawImage(frame,0,0,c.width,c.height);const ts=frame.timestamp/1000;frame.close();dec.frames++;msg.textContent='';
+      if(clock.offset!==null){meas.e2e.push(serverNow()-ts);meas.lastTs=ts;}
+      // Presentación: el canvas se pinta en el próximo refresco; rAF corre justo antes, así que mide casi al vidrio.
+      if(!rafPending){rafPending=true;requestAnimationFrame(()=>{rafPending=false;meas.presented++;if(clock.offset!==null&&meas.lastTs)meas.pres.push(serverNow()-meas.lastTs);});}
+    },
+    error:e=>{msg.textContent='decoder: '+e.message;needKey();}
   });
   decoder.configure(cfg);
-  waitingKey=true;ws.send(JSON.stringify({type:'need-key'}));
+  configuring=false;waitingKey=true;
+  const q=pending;pending=[];
+  for(const b of q)onVideoChunk(b);
+  if(waitingKey)needKey();   // el IDR no venía con el vconfig (nos sumamos a una captura en marcha): pedirlo
+}
+let configuring=false, pending=[], rafPending=false, keyAsk=0;
+// Pedir keyframe. Con intra-refresh el servidor reinicia el encoder; si no llega en 1,5 s (se ignoró por reciente), insistir.
+function needKey(){
+  waitingKey=true;if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'need-key'}));
+  clearTimeout(keyAsk);keyAsk=setTimeout(()=>{if(waitingKey)needKey();},1500);
 }
 function onVideoChunk(buf){
+  if(configuring){pending.push(buf);if(pending.length>120)pending.shift();return;}
   if(!decoder||decoder.state!=='configured')return;
-  const dv=new DataView(buf);const key=dv.getUint8(0)===1, ts=dv.getFloat64(1);
-  if(waitingKey){if(!key)return;waitingKey=false;}
-  if(decoder.decodeQueueSize>6){waitingKey=true;ws.send(JSON.stringify({type:'need-key'}));return;}
-  try{decoder.decode(new EncodedVideoChunk({type:key?'key':'delta',timestamp:ts,data:new Uint8Array(buf,9)}));}
-  catch(e){waitingKey=true;ws.send(JSON.stringify({type:'need-key'}));}
+  const dv=new DataView(buf);const key=dv.getUint8(0)===1, ts=dv.getFloat64(1);   // ts: reloj del servidor en ms
+  meas.bytes+=buf.byteLength-9;
+  if(waitingKey){if(!key){meas.drops++;meas.dropsSincePing++;return;}waitingKey=false;clearTimeout(keyAsk);}
+  if(decoder.decodeQueueSize>6){meas.drops++;meas.dropsSincePing++;needKey();return;}
+  try{decoder.decode(new EncodedVideoChunk({type:key?'key':'delta',timestamp:Math.round(ts*1000),data:new Uint8Array(buf,9)}));}
+  catch(e){meas.drops++;meas.dropsSincePing++;needKey();}
 }
-setInterval(()=>{const dt=(performance.now()-dec.t)/1000;if(decoder)hud.textContent=Math.round(dec.frames/dt)+' fps · cola '+decoder.decodeQueueSize+(penHud?' · '+penHud:'');dec={frames:0,t:performance.now()};},1000);
+// ---- HUD: fps decodificados (presentados) · e2e captura->pantalla p50/p95 (al decodificar / al presentar) · input ·
+// ---- rtt · cola · descartes · Mbps · lo que manda el servidor (escala, bitrate, modo). Tocar el HUD cambia el modo. ----
+const p=(a,q)=>{if(!a.length)return null;const s=a.slice().sort((x,y)=>x-y);return s[Math.min(s.length-1,Math.floor(s.length*q))];};
+const f=v=>v===null||v===undefined?'–':Math.round(v);
+let last={fps:0,pfps:0,mbps:0,e2e:[],pres:[]};
+function updateHud(){
+  const modeName=(MODES.find(m=>m[0]===qmode)||MODES[0])[1], s=clock.srv;
+  const srv=s.scale?Math.round(s.scale*100)+'%/'+s.br+'M'+(s.level?' n'+s.level:''):'';
+  if(!decoder){hud.innerHTML='<b>'+modeName+'</b>';return;}
+  hud.innerHTML=last.fps+' fps ('+last.pfps+' pres) · e2e '+f(p(last.e2e,.5))+'/'+f(p(last.e2e,.95))+' pres '+f(p(last.pres,.5))+'/'+f(p(last.pres,.95))
+    +' · in '+f(clock.inp50)+'/'+f(clock.inp95)+' · rtt '+f(clock.rtt)+' · cola '+decoder.decodeQueueSize+' · desc '+meas.drops
+    +' · '+last.mbps.toFixed(1)+' Mbps · '+srv+' <b>'+modeName+'</b>'+(penHud?' · '+penHud:'');
+}
+setInterval(()=>{
+  const dt=(performance.now()-dec.t)/1000;
+  last={fps:Math.round(dec.frames/dt),pfps:Math.round(meas.presented/dt),mbps:meas.bytes*8/dt/1e6,e2e:meas.e2e,pres:meas.pres};
+  updateHud();
+  dec={frames:0,t:performance.now()};meas.presented=0;meas.bytes=0;
+  // Ventana de 5 s para los percentiles: al vaciarse de a poco los últimos segundos pesan más.
+  if(meas.e2e.length>300)meas.e2e=meas.e2e.slice(-300);if(meas.pres.length>300)meas.pres=meas.pres.slice(-300);
+},1000);
+// stats al servidor cada 5 s (quedan en su log y en pc.html): fps, Mbps, e2e, cola, descartes, transporte.
+function sendStats(){
+  if(!ws||ws.readyState!==1||!decoder)return;
+  const n=v=>v===null||v===undefined?null:Math.round(v);
+  ws.send(JSON.stringify({type:'stats',fps:last.fps,pfps:last.pfps,mbps:+last.mbps.toFixed(1),e2e50:n(p(meas.e2e,.5)),e2e95:n(p(meas.e2e,.95)),
+    pres50:n(p(meas.pres,.5)),pres95:n(p(meas.pres,.95)),rtt:n(clock.rtt),q:decoder.decodeQueueSize,drops:meas.drops,transport:location.protocol==='https:'?'wss':'ws',mode:qmode}));
+}
 
 // ---- Input: Pencil = lápiz de Windows con presión, inclinación y hover. Un dedo = mover cursor (tap = click).
 // ---- Dos dedos = scroll. Mientras el Pencil toca, los dedos se ignoran (palma). ----
@@ -118,7 +201,8 @@ function norm(cx,cy){
   const s=Math.min(W/vw,H/vh), dw=vw*s, dh=vh*s, ox=(W-dw)/2, oy=(H-dh)/2;
   return [Math.min(1,Math.max(0,(cx-ox)/dw)), Math.min(1,Math.max(0,(cy-oy)/dh))];
 }
-const send=o=>{if(ws&&ws.readyState===1)ws.send(JSON.stringify(Object.assign({type:'input'},o)));};
+// Cada evento lleva t = reloj del servidor estimado (medición de latencia de input), cuando ya hay reloj sincronizado.
+const send=o=>{if(ws&&ws.readyState===1)ws.send(JSON.stringify(Object.assign({type:'input'},o,clock.offset!==null?{t:serverNow()}:{})));};
 let pendingMove=null, raf=0, touches=new Map(), lastScrollY=null, lastScrollX=null, tapStart=null, penDown=false;
 function flush(){raf=0;if(pendingMove){send(pendingMove);pendingMove=null;}}
 function queueMove(x,y){pendingMove={ev:'move',x:x,y:y};if(!raf)raf=requestAnimationFrame(flush);}

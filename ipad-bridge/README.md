@@ -12,7 +12,9 @@ quieta se ven los píxeles exactos de Windows. El Pencil y los toques vuelven a 
    (requiere la app "Dispositivos Apple" y haber tocado Confiar en el iPad), si no Wi-Fi; cambia solo.
    Bitrate automático: 100 Mbps por USB, 50 si algún visor va por red.
 2. iPad: abrí https://192.168.1.15/ipad.html en Safari, o la app iPadBridge de Playgrounds. La captura arranca
-   sola al conectarse el primer visor y se detiene con el último. http://localhost/ muestra el estado.
+   sola al conectarse el primer visor y se detiene con el último. http://localhost/ muestra el estado, la calidad
+   actual y lo que mide el iPad. En la página, el HUD de arriba a la derecha muestra fps y latencias (ver "Medición")
+   y tocarlo cambia el preset de calidad: automático → mejor para dibujar → mejor para movimiento.
 3. Pencil = lápiz de Windows (Windows Ink) con presión, inclinación, hover y botón lateral; Photoshop, Krita, Clip
    Studio (en modo Windows Ink) etc. lo ven como una tableta. Doble toque del Pencil = goma (tecla E, otro toque = B).
    Un dedo = mover cursor, tap = click. Dos dedos = scroll. Mientras el Pencil toca, los dedos se ignoran (palma).
@@ -77,7 +79,12 @@ pincel sigue al lápiz sin tocar), `leave` cuando se aleja, y la goma del doble 
   todo a los visores por WebSocket, sirve las páginas por http/https y aplica el input. Requiere ffmpeg (build "full"
   de gyan.dev, instalado con winget), GPU NVIDIA y Pillow; `FFMPEG=ruta` para otro binario.
 - `hevc.py`: parser mínimo de HEVC (tipos de NAL, SPS) y armado del hvcC y del codec string.
-- `tools/color_check.py`: mide ΔE entre la captura cruda y un frame decodificado (para evaluar fidelidad de color).
+- `tools/color_check.py`: mide ΔE entre la captura cruda y un frame decodificado (para evaluar fidelidad de color);
+  `tools/color_pattern.py` muestra un patrón estático (degradados, parches, texto, trama de 1 px) para medirlo.
+- `tools/stream_probe.py`: visor de medición sin iPad (fps, keyframes, Mbps, tiempo hasta la primera imagen, RTT,
+  need-key, `--dump` del flujo, `--sick` para simular un visor que sufre). `tools/motion_test.py`: ventana con
+  movimiento determinista. `tools/latency_clock.py` + `tools/latency_measure.py`: reloj en pantalla y lectura de ese
+  reloj en los frames decodificados, para medir captura → salida del encoder.
 - `winput.py`: inyección de input mapeada al monitor virtual si existe: mouse (SendInput, DPI-aware) para los dedos,
   lápiz virtual (pointer injection PT_PEN: presión, tilt, botón lateral, hover) para el Pencil, y teclas: `tap_keys`
   (pulsación de un atajo) y `hold_key`/`release_keys` (modificador mantenido, para la barra de teclas).
@@ -87,10 +94,19 @@ pincel sigue al lápiz sin tocar), `leave` cuando se aleja, y la goma del doble 
 - `certs/`: CA propia y certificado del servidor para 192.168.1.15. Si cambia la IP, reemitir `server.crt`.
 - `tools/fake_app.py`: simula la app nativa en la PC para probar el puente sin iPad.
 
-Protocolo visores: WebSocket, JSON `vconfig` (hvcC en base64, codec `hvc1.…`), JSON `still-clear`, binario
-u8 0|1 (delta|key) + f64 ts + muestra, o u8 2 + PNG (imagen fija).
+Protocolo visores: WebSocket, JSON `vconfig` (hvcC en base64, codec `hvc1.…`, `width`/`height` codificados: pueden
+ser menores que el monitor si la calidad adaptativa escaló), JSON `still-clear`, binario u8 0|1 (delta|key) + f64 ts +
+muestra, o u8 2 + PNG (imagen fija). `ts` es el reloj del servidor en ms de época (`now_ms()`: perf_counter anclado a
+`time.time()`) tomado cuando la muestra sale del encoder.
+Medición (todo aditivo, un visor viejo lo ignora): el visor manda `{"type":"ping","t":su reloj,"q":cola de
+decodificación,"d":descartes desde el último ping,"rtt":último RTT}` cada 2 s y el servidor contesta
+`{"type":"pong","t":el mismo,"mt":reloj del servidor,"inp50","inp95":latencia de input p50/p95 en ms,"br","scale",
+"fps","mode","level"}`; el visor manda `{"type":"stats",fps,pfps,mbps,e2e50,e2e95,pres50,pres95,rtt,q,drops,transport,
+mode}` cada 5 s (va al log del servidor y a pc.html), `{"type":"quality","mode":"auto|draw|motion"}` para el preset y
+`{"type":"need-key"}` para pedir un IDR. Cada `input` lleva `t` = reloj del servidor estimado por el visor.
 Protocolo app nativa: TCP, u32 largo + u8 tipo + payload (0 ping, 1 video, 2 config = u8 códec 1 avcC/2 hvcC + record,
-3 imagen fija PNG, 4 still-clear, 16 input JSON, 17 need-key).
+3 imagen fija PNG, 4 still-clear, 16 input JSON, 17 need-key, 18 JSON de control iPad→PC: ping/stats/quality tal cual,
+19 JSON de control PC→iPad: pong).
 Input JSON (igual por WebSocket, con `"type":"input"`): dedos `{"ev":"move|down|up|scroll","x","y","btn","dy","dx"}`;
 Pencil con `"pen":1`: `{"ev":"hover|down|up","x","y","p":0..1,"tx","ty":grados,"btn":2 = botón lateral}`,
 `{"ev":"moves","pts":[[x,y,p,tx,ty],...]}`, `{"ev":"leave"}`, `{"ev":"eraser","on":bool}`.
@@ -98,6 +114,77 @@ Barra de teclas (sin `"pen"`, se procesan aunque el Pencil esté en contacto): `
 un atajo (`tap_keys`: modificadores ctrl/shift/alt/win + letra, F1-F12, `[`, `]`, esc, tab, space, enter...);
 `{"ev":"mod","key":"shift|ctrl|alt|space|win","down":true|false}` mantiene esa tecla presionada hasta el `down:false`
 (el cliente lo manda al soltar el botón; el servidor suelta todo al desconectarse el visor).
+
+## Medición: cómo leer el HUD
+
+El HUD de `ipad.html` (arriba a la derecha) dice, por ejemplo:
+`60 fps (59 pres) · e2e 24/31 pres 29/38 · in 4/7 · rtt 3 · cola 0 · desc 0 · 48.2 Mbps · 100%/50M auto`
+
+- `60 fps (59 pres)`: frames decodificados por segundo y frames que llegaron a presentarse (uno por refresco; si hay
+  más decodificados que presentados, el iPad va más lento que el flujo).
+- `e2e 24/31`: latencia desde que la muestra salió del encoder de la PC hasta que el decodificador del iPad la entregó,
+  p50/p95 en ms de los últimos 5 s. `pres 29/38`: lo mismo pero medido al presentar (en el `requestAnimationFrame`
+  posterior al dibujo: lo más cerca del vidrio que permite Safari). A eso hay que sumarle lo que ddagrab + NVENC tardan
+  antes del `ts`, que no se ve desde el iPad: medido con `tools/latency_clock.py` (ver más abajo).
+- `in 4/7`: latencia de input (del Pencil o el dedo hasta que Windows lo inyecta) p50/p95; la mide el servidor con el
+  `t` que estampa el iPad en cada evento usando el reloj sincronizado, y la devuelve en el pong.
+- `rtt 3`: ida y vuelta del ping en ms. `cola`: muestras esperando en el decodificador. `desc`: muestras descartadas
+  desde que se abrió la página (cola > 6, o deltas sin keyframe previo).
+- `48.2 Mbps`: lo que está llegando. `100%/50M auto`: escala y bitrate que el servidor está usando y el preset
+  (`n1`, `n2`… si la calidad adaptativa bajó de nivel). Tocar el HUD cambia el preset.
+
+Reloj sincronizado (como OpenDisplay): el ping lleva el reloj del iPad, el pong devuelve ese valor y el del servidor;
+offset = servidor − (iPad + RTT/2) de la muestra con menor RTT entre las últimas 15 (RTT inválidos descartados).
+Con eso cada frame (`ts` del servidor) y cada evento de input se comparan en el mismo reloj.
+
+Medido en esta PC (RTX 4060, monitor 3840x2160 a 60 Hz, sin iPad; `tools/latency_clock.py` dibuja el reloj en una
+ventana, `tools/latency_measure.py` lo lee en los frames decodificados): desde que la ventana dibuja hasta que la muestra
+sale del encoder, p50 38 ms, p95 58 ms, mínimo 23 ms (dos corridas: 38,9/60,1 y 38,3/57,1). Incluye la composición de
+DWM, la espera de ddagrab a 60 fps y NVENC. Con el `-delay` por defecto de ffmpeg (NVENC retiene frames en su cola
+asíncrona) era p50 60 ms, p95 75; por eso `NVENC_DELAY=0` es el predeterminado (`NVENC_DELAY=` vacío deja el de
+ffmpeg). La latencia total hasta el vidrio del iPad es ese valor más el `pres` del HUD; con el iPad la mide Demian.
+`stats` cada 5 s queda en el log del servidor (`stats 192.168.1.63: fps=60 ... e2e50=24 ...`) y en pc.html, para
+diagnosticar Wi-Fi sin estar al lado del iPad.
+
+## Keyframes y calidad adaptativa
+
+- `KEYFRAMES=refresh` (predeterminado): un solo IDR al arrancar y después intra-refresh de NVENC (`-intra-refresh 1`,
+  GOP de `GOP_S` segundos, 10 por defecto): cada frame lleva una tira de bloques intra en vez de un keyframe entero por
+  segundo. Sin pulso de bitrate ni de calidad. Un visor nuevo (o uno que perdió el hilo) manda `need-key` y el servidor
+  reinicia el encoder para emitir un IDR, conservando la salida DXGI ya detectada: ~0,3 s hasta la imagen nueva
+  (antes, esperar al próximo keyframe: hasta 1 s). Los visores que ya estaban ven una congelación de ese tiempo.
+  `KEYFRAMES=idr` vuelve al comportamiento anterior (IDR cada segundo, `need-key` solo espera).
+  Medido (monitor 3840x2160 a 60 Hz, CBR 50 Mbps, visor `tools/stream_probe.py` por localhost; 30 de octubre de 2026):
+
+  | | IDR cada 1 s (`KEYFRAMES=idr`) | intra-refresh GOP 10 s | intra-refresh GOP 4 s |
+  |---|---|---|---|
+  | Mbps en reposo (patrón estático) | 5,1 (un IDR de ~300-500 KB por segundo) | 0,2 | 0,2 |
+  | Mbps en movimiento (`tools/motion_test.py`) | 15,6 | 13,3 | 11,0 |
+  | need-key hasta el IDR nuevo | 0,52 s (espera al próximo; hasta 1 s) | 0,30 s (reinicio) | 0,34 s (reinicio) |
+  | Primer visor, hasta la primera imagen | 0,96 s | 0,97 s | 0,97 s |
+  | ΔE medio / p95 vs. captura cruda, frame IDR | 1,21 / 4,7 | 1,23 / 4,7 | 1,23 / 4,8 |
+  | ΔE medio / p95, frames P (30…600) | 1,03 / 3,4 | 1,03 / 3,4 | 1,00-1,03 / 3,4 |
+
+  La calidad estática es la misma en los tres (el 4:2:0 manda); el primer IDR es un poco peor que los P que lo
+  siguen, y con IDR por segundo ese pulso vuelve cada segundo (en CBR los IDR siguientes ya salen con historia y no se
+  notan en el ΔE, pero sí en el bitrate). Queda intra-refresh con GOP de 10 s: menos bits que con 4 s y sin diferencia
+  de calidad. El tiempo hasta la primera imagen del primer visor lo domina el sondeo de la salida DXGI (~0,7 s) más el
+  arranque de ffmpeg; los visores siguientes ven imagen a los ~0,3 s de pedir el keyframe.
+- `ADAPTIVE=1` (predeterminado): el servidor mira lo que reportan los visores en cada ping/stats (cola ≥ 4, descartes,
+  RTT 40 ms por encima de su mínimo, fps recibidos < 75 % de los capturados) y, si un visor sufre dos ticks seguidos
+  (4 s), baja un nivel; como mucho cada 8 s; tras 30 s estables sube uno. Por USB solo cuenta la cola. Cada nivel es
+  (escala, factor de bitrate sobre el del transporte, tope de fps): automático 100 %/1.0 → 100 %/0.6 → 75 %/0.45 →
+  50 %/0.3; mejor para dibujar nunca baja la escala (100 %/1.0 → 100 %/0.7 → 100 %/0.5 a 30 fps → 100 %/0.35 a 30 fps);
+  mejor para movimiento nunca baja los fps (100 %/1.0 → 75 %/0.6 → 50 %/0.35 → 50 %/0.25). Cada cambio reinicia ffmpeg
+  (~0,3 s de congelación). `ADAPTIVE=0` lo apaga (queda el preset manual y el bitrate por transporte).
+  Probado con `tools/stream_probe.py --sick=4` (un visor que reporta cola 5 y descartes de los 4 a los 24 s): baja a
+  nivel 1 a los 8 s, 2 a los 16, 3 a los 24 (3840x2160 → 2880x1620 → 1920x1080, 50 → 30 → 22 → 15 Mbps, siempre
+  60 fps) y vuelve a nivel 2 a los 55 s, 30 s después de que el visor dejó de quejarse.
+- Escala reducida: este ffmpeg (8.1, build de gyan.dev) no puede escalar sin salir de la GPU: `scale_d3d11` falla al
+  crear la textura de salida y no hay mapeo D3D11 → CUDA (`hwmap` devuelve "no implementado"), así que el frame baja a
+  RAM (`hwdownload`) y sube a CUDA (`hwupload_cuda,scale_cuda`). Medido: sostiene 60 fps a 2560x1440 igual que el
+  pipeline directo, a costa de ~0,9 GB/s de PCIe y un hilo; por eso solo se usa cuando un visor por red sufre o con el
+  preset de movimiento bajo carga.
 
 ## Por qué puertos 80 y 443
 
@@ -110,11 +197,15 @@ puerto sin TLS y falla incluso la página http. Con 80/443 aterriza en el 443, d
   de cambiar el extremo del lápiz; si la ventana activa no es Photoshop, esas teclas van a lo que esté activo.
 - Latencia: al trazo se le suma el camino captura -> NVENC -> USB -> decodificación -> pantalla (unos 2-4 frames a
   60 Hz), más que un Cintiq cableado. El input vuelve mucho más rápido que el video, así que el trazo aparece un poco
-  después de la punta; Photoshop lo compensa con sus propios puntos, no con el video.
+  después de la punta; Photoshop lo compensa con sus propios puntos, no con el video. Ahora se mide (sección
+  "Medición"): el HUD da el tramo encoder → pantalla y la latencia de input; el tramo captura → encoder se mide con
+  `tools/latency_clock.py`.
 - Sin teclado completo desde el iPad: solo la barra de teclas (modificadores, deshacer/rehacer, [ ], B, E) y el
   doble toque del Pencil.
 - La app tiene que estar en primer plano en el iPad; iOS la suspende en segundo plano.
-- Keyframe cada segundo: un visor nuevo tarda hasta 1 s en ver imagen.
+- Keyframes: con intra-refresh no hay IDR periódicos; un visor nuevo pide uno y el encoder se reinicia (~0,3 s
+  hasta la imagen), lo que congela ese instante a los demás visores. `KEYFRAMES=idr` si se prefiere el keyframe por
+  segundo (sin reinicios, pero con el pulso de bitrate y hasta 1 s de espera).
 - Color (medido con ΔE contra la captura cruda): el video HEVC 10b 4:2:0 tiene ΔE medio 0.9 y p95 3.0; la
   compresión casi no pesa, la pérdida es el 4:2:0 (el iPad no decodifica 4:4:4 en hardware). Por eso la imagen fija
   PNG: ΔE 0 cuando la pantalla está quieta. NVENC convierte con BT.601 rango de video y lo declara; iPadOS gestiona

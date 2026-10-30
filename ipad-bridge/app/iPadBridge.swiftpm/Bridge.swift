@@ -14,6 +14,10 @@ import AVFoundation
 //     {"ev":"moves","pts":[[x,y,p,tx,ty],...]} (toques coalescidos), {"ev":"leave"}, {"ev":"eraser","on":bool}
 //     Barra de teclas (sin "pen"): {"ev":"key","keys":"ctrl+z"} pulsación, {"ev":"mod","key":"shift|ctrl|alt|space","down":bool}
 //   tipo 17 iPad->PC need-key: pedir keyframe
+//   tipo 18 iPad->PC JSON de control: {"type":"ping","t":reloj iPad ms,"q","d","rtt"} cada 2 s, {"type":"stats",...} cada 5 s
+//   tipo 19 PC->iPad JSON de control: {"type":"pong","t","mt":reloj PC ms,"inp50","inp95",...}
+//   Reloj sincronizado estilo NTP (offset de la muestra de menor RTT de las últimas 15); el input lleva "t" en el reloj
+//   de la PC para medir la latencia de input, y cada frame trae ts (f64, reloj de la PC en ms al salir del encoder).
 
 final class Bridge: ObservableObject {
     static let port: UInt16 = 7777
@@ -32,6 +36,17 @@ final class Bridge: ObservableObject {
     private var frames = 0
     private var bytes = 0
     private var statsTimer: Timer?
+    // Medición: reloj sincronizado con la PC y latencia de llegada de los frames (encoder -> app, antes de decodificar).
+    private var clockSamples: [(rtt: Double, offset: Double)] = []
+    private var clockOffset: Double?           // reloj PC - reloj iPad, en ms
+    private var lastRtt: Double?
+    private var inp50: Double?, inp95: Double?
+    private var arrival: [Double] = []         // ms entre ts del frame y su llegada a la app
+    private var tick = 0
+
+    private var localMs: Double { ProcessInfo.processInfo.systemUptime * 1000 }
+    /// Reloj de la PC estimado (ms), o nil si todavía no hubo pong.
+    var serverNow: Double? { clockOffset.map { localMs + $0 } }
 
     /// La vista de video se registra acá para recibir los sample buffers y las imágenes fijas.
     var onSample: ((CMSampleBuffer) -> Void)?
@@ -45,7 +60,21 @@ final class Bridge: ObservableObject {
         statsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             guard let s = self else { return }
             let mbps = Double(s.bytes * 8) / 1e6
-            s.hud = s.conn == nil ? "" : String(format: "%d fps · %.1f Mbps", s.frames, mbps)
+            let a = s.arrival.sorted()
+            let p50 = a.isEmpty ? -1 : a[a.count / 2], p95 = a.isEmpty ? -1 : a[min(a.count - 1, a.count * 95 / 100)]
+            s.hud = s.conn == nil ? "" : String(format: "%d fps · %.1f Mbps · llegada %.0f/%.0f ms · in %.0f/%.0f · rtt %.0f",
+                                                s.frames, mbps, p50, p95, s.inp50 ?? -1, s.inp95 ?? -1, s.lastRtt ?? -1)
+            s.tick += 1
+            if s.tick % 2 == 0 {   // ping cada 2 s: reloj + cola (la capa no la expone: 0) + descartes (0) + último RTT
+                var m: [String: Any] = ["type": "ping", "t": s.localMs, "q": 0, "d": 0]
+                if let r = s.lastRtt { m["rtt"] = r }
+                s.sendJSON(m)
+            }
+            if s.tick % 5 == 0 {   // stats cada 5 s al log de la PC y a pc.html
+                s.sendJSON(["type": "stats", "fps": s.frames, "mbps": (mbps * 10).rounded() / 10, "e2e50": p50.rounded(), "e2e95": p95.rounded(),
+                            "rtt": (s.lastRtt ?? -1).rounded(), "q": 0, "drops": 0, "transport": "app", "note": "llegada, no presentación"])
+                s.arrival.removeAll(keepingCapacity: true)
+            }
             s.frames = 0; s.bytes = 0
         }
     }
@@ -153,11 +182,21 @@ final class Bridge: ObservableObject {
             onStill?(Data(payload))
         case 4:
             onStill?(nil)
+        case 19:
+            if let m = try? JSONSerialization.jsonObject(with: Data(payload)) as? [String: Any], m["type"] as? String == "pong" {
+                handlePong(m)
+            }
         case 1:
             guard let fmt = format, payload.count > 9 else { return }
             let p = Data(payload)
             let key = p[p.startIndex] == 1
             if waitingKey { if !key { return }; waitingKey = false }
+            if let now = serverNow {
+                // ts f64 big-endian en los bytes 1..8: reloj de la PC (ms) al salir del encoder
+                let bits = p[p.startIndex + 1 ..< p.startIndex + 9].reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+                let ts = Double(bitPattern: bits)
+                if ts > 0 { arrival.append(now - ts); if arrival.count > 600 { arrival.removeFirst(arrival.count - 600) } }
+            }
             let nal = p.dropFirst(9)
             if let sample = makeSample(data: Data(nal), format: fmt) {
                 frames += 1; bytes += nal.count
@@ -165,6 +204,19 @@ final class Bridge: ObservableObject {
             }
         default: break
         }
+    }
+
+    /// pong de la PC: RTT y offset de reloj (muestra de menor RTT de las últimas 15, RTT inválidos descartados).
+    private func handlePong(_ m: [String: Any]) {
+        guard let t = m["t"] as? Double, let s = m["mt"] as? Double else { return }
+        let now = localMs, rtt = now - t
+        guard rtt >= 0, rtt < 2000 else { return }
+        clockSamples.append((rtt: rtt, offset: s - (t + rtt / 2)))
+        if clockSamples.count > 15 { clockSamples.removeFirst() }
+        if let best = clockSamples.min(by: { $0.rtt < $1.rtt }) { clockOffset = best.offset }
+        lastRtt = rtt
+        inp50 = m["inp50"] as? Double
+        inp95 = m["inp95"] as? Double
     }
 
     // MARK: - Envío
@@ -180,8 +232,16 @@ final class Bridge: ObservableObject {
     }
 
     func sendInput(_ dict: [String: Any]) {
-        guard let json = try? JSONSerialization.data(withJSONObject: dict) else { return }
+        var d = dict
+        if let now = serverNow { d["t"] = now }   // reloj de la PC estimado: la PC mide la latencia hasta inyectar
+        guard let json = try? JSONSerialization.data(withJSONObject: d) else { return }
         send(type: 16, payload: json)
+    }
+
+    /// Mensaje JSON de control (ping, stats, quality) a la PC, tipo 18.
+    func sendJSON(_ dict: [String: Any]) {
+        guard let json = try? JSONSerialization.data(withJSONObject: dict) else { return }
+        send(type: 18, payload: json)
     }
 
     func requestKeyframe() {

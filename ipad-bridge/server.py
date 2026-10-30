@@ -5,8 +5,11 @@ como PNG (sin pérdida), que el visor muestra encima del video hasta que algo se
 Mensajes a los visores:
   JSON   {"type":"vconfig", codec, width, height, description(base64 hvcC)}
   JSON   {"type":"still-clear"}                      -> volver a mostrar el video
-  binario u8 0|1 (delta|key) + f64 ts + muestra HEVC (NALs con largo de 4 bytes)
+  JSON   {"type":"pong", t, mt, inp50, inp95, ...}   -> respuesta al ping del visor (mt = reloj del servidor en ms)
+  binario u8 0|1 (delta|key) + f64 ts + muestra HEVC (NALs con largo de 4 bytes); ts = reloj del servidor en ms
   binario u8 2 + PNG                                 -> imagen fija sin pérdida
+Del visor: {"type":"ping","t":reloj del visor}, {"type":"stats",...} cada 5 s, {"type":"quality","mode":"auto|draw|motion"},
+{"type":"need-key"} (pide un IDR: reinicia el encoder), {"type":"input", ..., "t": reloj del servidor estimado}.
 """
 import asyncio
 import base64
@@ -20,6 +23,7 @@ import ssl
 import struct
 import sys
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -42,8 +46,34 @@ MAX_FPS = int(os.environ.get("MAX_FPS", "60"))
 # Doble toque del Pencil: alterna entre dos atajos en la ventana activa (Photoshop: E = borrador, B = pincel).
 # Windows no permite emular el lado goma de un lápiz sintético, por eso va por teclado. Formato "tecla_goma,tecla_vuelta".
 PEN_TAP_KEYS = os.environ.get("PEN_TAP_KEYS", "e,b").split(",")
+# Keyframes. "refresh" (predeterminado): GOP de GOP_S segundos con intra-refresh de NVENC (columnas intra repartidas
+# entre los frames: sin pulso de bitrate ni de calidad cada segundo; medido a 3840x2160: reposo 5,1 -> 0,2 Mbps). Un
+# visor nuevo pide need-key y el encoder se reinicia para emitir un IDR (~0,3 s). "idr": comportamiento anterior, un
+# IDR por segundo (GOP = fps), need-key espera al próximo (hasta 1 s).
+KEYFRAMES = os.environ.get("KEYFRAMES", "refresh")
+GOP_S = float(os.environ.get("GOP_S", "10" if KEYFRAMES == "refresh" else "1"))
+# Calidad adaptativa: "1" (predeterminado) baja bitrate/escala/fps cuando un visor por red sufre (cola, descartes, RTT)
+# y vuelve a subir al estabilizarse; "0" la desactiva (queda el preset manual del iPad y el bitrate por transporte).
+ADAPTIVE = os.environ.get("ADAPTIVE", "1") != "0"
+NVENC_DELAY = os.environ.get("NVENC_DELAY", "0")   # frames que NVENC puede retener antes de entregar ("" = valor de ffmpeg)
+
+# Reloj del servidor para medir latencias (ms de época): perf_counter (QPC, sub-ms) anclado a time.time(), que en
+# Windows tiene resolución de 15,6 ms. Los frames llevan este reloj en `ts` y el visor lo sincroniza con ping/pong.
+_CLOCK0 = time.time() - time.perf_counter()
+
+
+def now_ms():
+    return (time.perf_counter() + _CLOCK0) * 1000.0
+
+
+def pct(samples, p):
+    """Percentil p (0..100) de una secuencia, o None si está vacía."""
+    s = sorted(samples)
+    return round(s[min(len(s) - 1, int(len(s) * p / 100))], 1) if s else None
+
 
 state = {"ipads": set(), "status": set()}
+input_lat = deque(maxlen=300)   # latencia de input en ms: reloj del servidor al inyectar - "t" que estampó el visor
 mouse = Mouse()
 pen = Pen(mouse)
 log = logging.getLogger("bridge")
@@ -83,6 +113,87 @@ def wanted_bitrate():
     return BITRATE_USB if transports and transports <= {"usb"} else BITRATE_NET
 
 
+# ---------------------------------------------------------------- calidad adaptativa (ítem 1.7 del plan)
+
+class Quality:
+    """Decide escala de captura, factor de bitrate y tope de fps según lo que miden los visores (cola de decodificación,
+    descartes, RTT del ping y fps recibidos, que llegan en cada ping/stats) y el preset manual del iPad.
+    Un solo encoder sirve a todos los visores, así que manda el que peor va. Cada cambio reinicia ffmpeg (~0,3 s de
+    congelación), por eso hay histéresis: baja tras 2 ticks malos seguidos (4 s) y como mucho cada 8 s; sube tras 30 s
+    estables. Por USB solo cuenta la cola del decodificador (no hay red que sufra).
+    Escalas: 100/75/50 % del monitor. Modos: auto = primero bitrate, después escala; draw (mejor para dibujar) = nunca
+    baja la escala, sacrifica bitrate y fps; motion (mejor para movimiento) = nunca baja los fps, sacrifica escala."""
+
+    LADDERS = {
+        "auto":   [dict(scale=1.0, br=1.0, fps=None), dict(scale=1.0, br=0.6, fps=None), dict(scale=0.75, br=0.45, fps=None), dict(scale=0.5, br=0.3, fps=None)],
+        "draw":   [dict(scale=1.0, br=1.0, fps=None), dict(scale=1.0, br=0.7, fps=None), dict(scale=1.0, br=0.5, fps=30), dict(scale=1.0, br=0.35, fps=30)],
+        "motion": [dict(scale=1.0, br=1.0, fps=None), dict(scale=0.75, br=0.6, fps=None), dict(scale=0.5, br=0.35, fps=None), dict(scale=0.5, br=0.25, fps=None)],
+    }
+    STEP_DOWN_TICKS, STEP_UP_TICKS, COOLDOWN = 2, 15, 8.0   # ticks de 2 s (status_loop)
+
+    def __init__(self):
+        self.mode, self.level = "auto", 0
+        self.bad = self.good = 0
+        self.changed_at = 0.0
+        self.reason = ""
+
+    def set_mode(self, mode):
+        if mode not in self.LADDERS:
+            raise ValueError(f"modo de calidad desconocido: {mode}")
+        if mode != self.mode:
+            log.info("calidad: modo %s (antes %s)", mode, self.mode)
+            self.mode, self.level, self.bad, self.good = mode, 0, 0, 0
+
+    def current(self):
+        return self.LADDERS[self.mode][self.level]
+
+    def info(self):
+        c = self.current()
+        return {"mode": self.mode, "level": self.level, "scale": c["scale"], "br": c["br"], "fps_cap": c["fps"], "reason": self.reason}
+
+    @staticmethod
+    def viewer_trouble(w, capture_fps):
+        """Qué sufre un visor según sus últimos pings/stats, o '' si va bien."""
+        q, drops = getattr(w, "_q", 0), getattr(w, "_drops", 0)
+        if q >= 4:
+            return f"cola {q}"
+        if drops:
+            return f"descartes {drops}"
+        if getattr(w, "_transport", "net") == "usb":
+            return ""
+        rtts = getattr(w, "_rtt", ())
+        if len(rtts) >= 4 and min(rtts[-2:]) > min(rtts) + 40:
+            return f"rtt {rtts[-1]:.0f} ms (base {min(rtts):.0f})"
+        st = getattr(w, "_stats", None)
+        if st and capture_fps and st.get("fps") is not None and st["fps"] < 0.75 * capture_fps and now_ms() - st.get("_at", 0) < 8000:
+            return f"fps {st['fps']} de {capture_fps}"
+        return ""
+
+    def tick(self, viewers, capture_fps):
+        """Cada 2 s desde status_loop. Devuelve True si cambió el nivel (hay que reiniciar la captura)."""
+        if not ADAPTIVE or not viewers:
+            return False
+        troubles = [t for t in (self.viewer_trouble(w, capture_fps) for w in viewers) if t]
+        now = time.monotonic()
+        ladder = self.LADDERS[self.mode]
+        if troubles:
+            self.bad, self.good = self.bad + 1, 0
+            if self.bad >= self.STEP_DOWN_TICKS and self.level < len(ladder) - 1 and now - self.changed_at >= self.COOLDOWN:
+                self.level, self.bad, self.changed_at, self.reason = self.level + 1, 0, now, troubles[0]
+                log.info("calidad: bajo a nivel %d (%s) por %s", self.level, ladder[self.level], troubles[0])
+                return True
+        else:
+            self.bad, self.good = 0, self.good + 1
+            if self.good >= self.STEP_UP_TICKS and self.level > 0:
+                self.level, self.good, self.changed_at, self.reason = self.level - 1, 0, now, "estable"
+                log.info("calidad: subo a nivel %d (%s): 30 s estable", self.level, ladder[self.level])
+                return True
+        return False
+
+
+quality = Quality()
+
+
 async def find_output(width, height):
     """Índice de salida DXGI cuyo tamaño coincide con el monitor objetivo (ddagrab enumera salidas del adaptador)."""
     for idx in range(4):
@@ -119,6 +230,16 @@ class Capture:
         self.output_idx = None
         self.fps = 60
         self.bitrate = BITRATE_NET
+        self.scale = 1.0
+        self.width = self.height = 0      # tamaño codificado (el monitor por la escala)
+        self.last_key_at = 0.0            # monotonic del último IDR emitido
+        self.restarting = False
+
+    def wanted(self):
+        """(bitrate, fps, escala) que corresponde ahora: transporte de los visores, refresco del monitor y calidad."""
+        q, t = quality.current(), target_info()
+        fps = min(t["hz"], q["fps"]) if q["fps"] else t["hz"]
+        return max(5, round(wanted_bitrate() * q["br"])), fps, q["scale"]
 
     async def start(self):
         if self.task and not self.task.done():
@@ -138,35 +259,74 @@ class Capture:
         """Reinicia ffmpeg si cambió el bitrate deseado (p. ej. un visor pasó de Wi-Fi a USB) o el refresco del monitor."""
         if self.proc is None or self.task is None or self.task.done():
             return
-        t = target_info()
-        if (wanted_bitrate(), t["hz"]) != (self.bitrate, self.fps):
-            log.info("reiniciando captura: %d Mbps @ %d fps", wanted_bitrate(), t["hz"])
+        br, fps, scale = self.wanted()
+        if (br, fps, scale) != (self.bitrate, self.fps, self.scale):
+            log.info("reiniciando captura: %d Mbps @ %d fps, escala %d %%", br, fps, scale * 100)
+            await self.restart()
+
+    async def restart(self):
+        """Reinicia ffmpeg conservando la salida DXGI ya encontrada (sin volver a sondear: ~0,5 s en vez de ~1,5)."""
+        if self.restarting:
+            return
+        self.restarting = True
+        try:
             await self.stop()
             await self.start()
+        finally:
+            self.restarting = False
+
+    async def request_key(self):
+        """need-key de un visor: con intra-refresh no hay más IDR que el primero, así que se reinicia el encoder.
+        Se ignora si el último IDR salió hace menos de 1 s (el visor acaba de conectarse y ya lo tiene o está en camino)."""
+        if KEYFRAMES != "refresh" or self.proc is None or self.task is None or self.task.done():
+            return
+        now = time.monotonic()
+        # Encoder recién arrancado (su IDR inicial viene en camino) o IDR reciente: no reiniciar de nuevo. También frena
+        # a un visor que pide keyframes en cadena (p. ej. una pestaña en segundo plano que no da abasto).
+        if now - self.started_at < 1.5 or now - self.last_key_at < 1.0 or self.restarting:
+            return
+        log.info("need-key: reinicio del encoder para emitir un IDR")
+        await self.restart()
 
     async def _run(self):
         while True:
             t = target_info()
-            idx = await find_output(t["width"], t["height"])
+            idx = self.output_idx if self.output_idx is not None else await find_output(t["width"], t["height"])
             if idx is None:
                 log.error("no encuentro la salida DXGI del monitor %s (%dx%d); reintento en 5 s", t["name"], t["width"], t["height"])
                 await asyncio.sleep(5)
                 continue
             self.output_idx = idx
-            self.fps, self.bitrate = t["hz"], wanted_bitrate()
-            fps, br = self.fps, self.bitrate
+            self.bitrate, self.fps, self.scale = self.wanted()
+            fps, br, scale = self.fps, self.bitrate, self.scale
+            self.width, self.height = (t["width"], t["height"]) if scale == 1 else (int(t["width"] * scale) & ~1, int(t["height"] * scale) & ~1)
+            graph = f"ddagrab=output_idx={idx}:framerate={fps}"
+            if scale != 1:
+                # Escala reducida (calidad adaptativa). Este ffmpeg no mapea D3D11->CUDA ni le anda scale_d3d11 (falla al
+                # crear la textura, medido con 8.1), así que el frame baja a RAM y vuelve a CUDA: 2560x1440 a 60 fps
+                # sostenidos (medido), ~0,9 GB/s de PCIe y un hilo; solo se usa cuando un visor por red sufre.
+                graph += f",hwdownload,format=bgra,hwupload_cuda,scale_cuda=w={self.width}:h={self.height}"
+            gop = max(1, round(fps * GOP_S))
             args = [FFMPEG, "-hide_banner", "-loglevel", "error",
-                    "-filter_complex", f"ddagrab=output_idx={idx}:framerate={fps}",
+                    "-filter_complex", graph,
                     # HEVC Main10 desde RGB de 8 bits (highbitdepth): menos banding y ~40% menos bits que H.264.
                     # NVENC convierte RGB->YUV con BT.601 y lo declara en el VUI (medido: coincide con la captura).
                     "-c:v", "hevc_nvenc", "-preset", "p4", "-tune", "ll", "-zerolatency", "1",
-                    "-rc", "cbr", "-b:v", f"{br}M", "-maxrate", f"{br}M", "-bufsize", f"{br // 4}M",
+                    # -delay 0: entregar cada frame apenas codificado; por defecto NVENC retiene frames en su cola
+                    # asíncrona (medido con tools/latency_clock.py, ver README). NVENC_DELAY="" deja el valor de ffmpeg.
+                    *(["-delay", NVENC_DELAY] if NVENC_DELAY else []),
+                    "-rc", "cbr", "-b:v", f"{br}M", "-maxrate", f"{br}M", "-bufsize", f"{max(1, br // 4)}M",
                     "-profile:v", "main10", "-highbitdepth", "1", "-spatial-aq", "1", "-aq-strength", "8",
-                    "-g", str(fps), "-bf", "0", "-aud", "1", "-f", "hevc", "-"]
-            log.info("captura: %s %dx%d @ %d fps (salida %d) -> NVENC HEVC 10b %d Mbps", t["name"], t["width"], t["height"], fps, idx, br)
+                    "-g", str(gop), "-bf", "0", "-aud", "1"]
+            if KEYFRAMES == "refresh":
+                # Intra-refresh: GOP infinito tras el IDR inicial, con una onda de columnas intra cada `gop` frames.
+                args += ["-intra-refresh", "1"]
+            args += ["-f", "hevc", "-"]
+            log.info("captura: %s %dx%d @ %d fps (salida %d) -> NVENC HEVC 10b %d Mbps, %s, GOP %d", t["name"], self.width, self.height,
+                     fps, idx, br, "intra-refresh" if KEYFRAMES == "refresh" else "IDR", gop)
             self.proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             self.started_at = time.monotonic()
-            self.vps = self.sps = self.pps = self.config_msg = None
+            self.vps = self.sps = self.pps = None   # config_msg se conserva: solo se reenvía si cambia
             try:
                 await self._pump(self.proc.stdout)
             except asyncio.CancelledError:
@@ -175,6 +335,7 @@ class Capture:
             err = (await self.proc.stderr.read()).decode(errors="replace").strip()
             log.error("ffmpeg terminó (%s): %s", self.proc.returncode, err[-400:])
             self.proc = None
+            self.output_idx = None    # volver a sondear por si cambió la disposición de monitores
             await asyncio.sleep(2)
 
     def _kill(self):
@@ -224,17 +385,23 @@ class Capture:
         if not (self.vps and self.sps and self.pps):
             return
         rec, s = hevc.build_hvcc(self.vps, self.sps, self.pps)
-        t = target_info()
-        self.config_msg = {"type": "vconfig", "codec": hevc.codec_string(s), "width": t["width"], "height": t["height"],
-                           "description": base64.b64encode(rec).decode()}
-        log.info("config %s %dx%d %d bits", self.config_msg["codec"], t["width"], t["height"], s["bit_depth_luma"])
+        msg = {"type": "vconfig", "codec": hevc.codec_string(s), "width": self.width, "height": self.height,
+               "description": base64.b64encode(rec).decode()}
+        if msg == self.config_msg:
+            return   # reinicio del encoder con los mismos parámetros (need-key): los visores no tienen que reconfigurar
+        self.config_msg = msg
+        log.info("config %s %dx%d %d bits", msg["codec"], self.width, self.height, s["bit_depth_luma"])
         asyncio.create_task(send_ipads(self.config_msg))
 
     async def _emit(self, nals, key):
         if not self.config_msg:
             return
         payload = b"".join(struct.pack(">I", len(n)) + n for n in nals)
-        ts = (time.monotonic() - self.started_at) * 1e6
+        # ts: reloj del servidor (ms de época) al salir del encoder. No es el instante de captura: ddagrab + NVENC quedan
+        # fuera (medido con un reloj en pantalla: ver README, "Cómo leer el HUD").
+        ts = now_ms()
+        if key:
+            self.last_key_at = time.monotonic()
         self.frames += 1
         self.bytes += len(payload)
         await send_ipads(data=struct.pack(">Bd", 1 if key else 0, ts) + payload)
@@ -460,6 +627,7 @@ async def ws_handler(request):
             if t == "hello":
                 role = "ipad" if m.get("role") == "ipad" else "status"
                 ws._transport = m.get("transport", "net")  # la app por usb_bridge dice "usb" o "net"; Safari no dice nada = red
+                ws._rtt, ws._q, ws._drops, ws._stats = deque(maxlen=30), 0, 0, None   # medición (ping/stats del visor)
                 state["ipads" if role == "ipad" else "status"].add(ws)
                 log.info("%s conectado desde %s por %s (visores: %d)", role, request.remote, ws._transport, len(state["ipads"]))
                 if role == "ipad":
@@ -474,7 +642,28 @@ async def ws_handler(request):
                                     "target": target_info()})
             elif t == "input":
                 handle_input(m)
-            # need-key: NVENC manda un keyframe por segundo (GOP = fps), el visor espera el próximo.
+                if "t" in m:   # el visor estampa el evento con el reloj del servidor estimado: latencia hasta inyectar
+                    input_lat.append(now_ms() - float(m["t"]))
+            elif t == "ping" and role:
+                # Sincronización de reloj estilo NTP: devolvemos su t y nuestro reloj; el visor calcula RTT y offset.
+                # De paso trae cola del decodificador (q), descartes desde el último ping (d) y su último RTT.
+                ws._q, ws._drops = int(m.get("q", 0)), int(m.get("d", 0))
+                if m.get("rtt") is not None:
+                    ws._rtt.append(float(m["rtt"]))
+                await send(ws, {"type": "pong", "t": m.get("t"), "mt": now_ms(), "inp50": pct(input_lat, 50), "inp95": pct(input_lat, 95),
+                                "br": capture.bitrate, "scale": capture.scale, "fps": capture.fps, "mode": quality.mode, "level": quality.level})
+            elif t == "stats":
+                ws._stats = dict(m, _at=now_ms(), transport=m.get("transport", ws._transport), remote=request.remote)
+                log.info("stats %s: %s", request.remote, " ".join(f"{k}={v}" for k, v in m.items() if k != "type"))
+            elif t == "quality":
+                try:
+                    quality.set_mode(str(m.get("mode", "auto")))
+                    await capture.restart_if_needed()
+                except ValueError as e:
+                    log.warning("calidad: %s", e)
+            elif t == "need-key":
+                # Con KEYFRAMES=idr el visor espera al próximo IDR (uno por segundo); con intra-refresh se reinicia el encoder.
+                await capture.request_key()
     finally:
         if role:
             state["ipads" if role == "ipad" else "status"].discard(ws)
@@ -501,13 +690,17 @@ async def status_loop():
         mbps = (capture.bytes - last_b) * 8 / dt / 1e6
         last_f, last_b, last_t = capture.frames, capture.bytes, now
         if state["ipads"]:
-            await capture.restart_if_needed()  # cambió el refresco del monitor o el transporte de un visor
+            quality.tick(list(state["ipads"]), capture.fps if capture.proc else 0)
+            await capture.restart_if_needed()  # cambió el refresco del monitor, el transporte de un visor o la calidad
             if capture.proc is not None and capture.output_idx is not None:
                 await stills.start(capture.output_idx)
         st = {"type": "status", "viewers": len(state["ipads"]), "capturing": capture.proc is not None,
               "fps": round(fps), "mbps": round(mbps, 1), "target": target_info(), "bitrate": capture.bitrate,
               "still": stills.current_png is not None, "stills_sent": stills.sent,
-              "transports": sorted({getattr(w, "_transport", "net") for w in state["ipads"]})}
+              "transports": sorted({getattr(w, "_transport", "net") for w in state["ipads"]}),
+              "quality": dict(quality.info(), width=capture.width, height=capture.height, fps=capture.fps, keyframes=KEYFRAMES),
+              "input_ms": {"p50": pct(input_lat, 50), "p95": pct(input_lat, 95)},
+              "viewer_stats": [getattr(w, "_stats", None) for w in state["ipads"] if getattr(w, "_stats", None)]}
         for w in list(state["status"]):
             await send(w, st)
 
