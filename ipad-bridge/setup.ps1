@@ -27,8 +27,8 @@ if (-not (Have ffmpeg) -or -not ((ffmpeg -hide_banner -filters 2>$null) -match "
 ffmpeg -version 2>$null | Select-Object -First 1
 
 Write-Host "== 3/6 Librerías de Python =="
-python -m pip install --quiet --upgrade aiohttp pymobiledevice3 pillow cryptography numpy zeroconf qrcode
-python -c "import aiohttp, pymobiledevice3, PIL, cryptography, zeroconf, qrcode; print('librerias ok')"
+python -m pip install --quiet --upgrade aiohttp pymobiledevice3 pillow cryptography numpy zeroconf qrcode pystray   # zeroconf/qrcode: mDNS y QR; pystray: tray.py
+python -c "import aiohttp, pymobiledevice3, PIL, cryptography, zeroconf, qrcode, pystray; print('librerias ok')"
 
 Write-Host "== 4/6 Dispositivos Apple (servicio USB para el iPad por cable) =="
 if (-not (Get-AppxPackage -Name "AppleInc.AppleDevices*")) { Winget "9NP83LWLPZ9K" "msstore" } else { Write-Host "ya instalada" }

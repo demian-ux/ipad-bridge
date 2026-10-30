@@ -1,13 +1,28 @@
 # Instala Virtual Display Driver (MikeTheTech, MIT, firmado por SignPath) como monitor virtual para el iPad,
 # con las resoluciones del iPad Pro 12.9" a 60 y 120 Hz. Descarga el driver y nefcon desde GitHub si hace falta.
 # Requiere administrador (se eleva solo). Fuente: https://github.com/VirtualDrivers/Virtual-Display-Driver
+# -DownloadOnly: solo baja y descomprime en -Src (sin administrador); lo usa installer\build.ps1 para empaquetar el driver.
 param(
     [string]$Src = "$env:LOCALAPPDATA\Temp\ipad-bridge-dl",
-    [string]$Dst = "C:\VirtualDisplayDriver"
+    [string]$Dst = "C:\VirtualDisplayDriver",
+    [switch]$DownloadOnly
 )
 $ErrorActionPreference = "Stop"
 $VddUrl = "https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/download/25.7.23/VirtualDisplayDriver-x86.Driver.Only.zip"
 $NefconUrl = "https://github.com/nefarius/nefcon/releases/download/v1.21.0/nefcon_v1.21.0.zip"
+
+function Download-Vdd($Src) {
+    $driverDir = Join-Path $Src "vdd\VirtualDisplayDriver"
+    $nefcon = Join-Path $Src "nefcon\x64\nefconc.exe"
+    if ((Test-Path (Join-Path $driverDir "MttVDD.inf")) -and (Test-Path $nefcon)) { Write-Host "1/5 Driver y nefcon ya descargados"; return }
+    Write-Host "1/5 Descargando driver y nefcon"
+    New-Item -ItemType Directory -Force -Path $Src | Out-Null
+    Invoke-WebRequest -Uri $VddUrl -OutFile (Join-Path $Src "vdd-x86.zip") -UseBasicParsing
+    Invoke-WebRequest -Uri $NefconUrl -OutFile (Join-Path $Src "nefcon.zip") -UseBasicParsing
+    Expand-Archive -Path (Join-Path $Src "vdd-x86.zip") -DestinationPath (Join-Path $Src "vdd") -Force
+    Expand-Archive -Path (Join-Path $Src "nefcon.zip") -DestinationPath (Join-Path $Src "nefcon") -Force
+}
+if ($DownloadOnly) { Download-Vdd $Src; exit 0 }
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {

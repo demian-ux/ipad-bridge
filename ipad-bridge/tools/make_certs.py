@@ -3,6 +3,7 @@ Sin openssl: usa el paquete `cryptography`. La CA se reutiliza si ya existe (el 
 el certificado del servidor se reemite si falta, venció o cambió la IP.   Uso: python tools/make_certs.py [IP]"""
 import datetime as dt
 import ipaddress
+import os
 import socket
 import sys
 from pathlib import Path
@@ -13,8 +14,9 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 import os
-# Misma carpeta que usa server.py: la del proyecto, o IPADBRIDGE_CERTS cuando está instalado (datos del usuario)
-CERTS = Path(os.environ.get("IPADBRIDGE_CERTS") or Path(__file__).resolve().parent.parent / "certs")
+# Misma carpeta que usa server.py: la del proyecto, o IPAD_BRIDGE_DATA cuando está instalado (datos del usuario);
+# IPADBRIDGE_CERTS cambia solo la carpeta de certificados.
+CERTS = Path(os.environ.get("IPADBRIDGE_CERTS") or Path(os.environ.get("IPAD_BRIDGE_DATA") or Path(__file__).resolve().parent.parent) / "certs")
 
 
 def local_ip():

@@ -10,6 +10,10 @@ __pycache__/
 *.pyc
 # paquete distribuible generado
 /ipad-bridge.zip
+# instalador: descargas, carpeta armada y salida de Inno Setup (installer/build.ps1 los regenera)
+ipad-bridge/installer/vendor/
+ipad-bridge/installer/payload/
+ipad-bridge/installer/dist/
 # configuración local de Claude
 .claude/settings.local.json
 # tokens de emparejamiento (hasheados) e id de la PC

@@ -43,8 +43,11 @@ from pairing import Pairing
 from winput import Mouse, Pen, foreground_app, hold_key, release_keys, tap_keys, target_display, tilt_from_angles, type_text
 
 STATIC = Path(__file__).parent / "static"
-# Carpeta de datos (certificados, pairing.json): la del proyecto, o IPADBRIDGE_CERTS cuando se instala en Program Files
-CERTS = Path(os.environ.get("IPADBRIDGE_CERTS") or Path(__file__).parent / "certs")
+# Datos que se escriben (certificados, pairing.json, server.log): la carpeta del proyecto, o IPAD_BRIDGE_DATA cuando
+# corre instalado en Archivos de programa (la bandeja lo apunta a %LOCALAPPDATA%\iPad Bridge). IPADBRIDGE_CERTS cambia
+# solo la carpeta de certificados y emparejamiento.
+DATA = Path(os.environ.get("IPAD_BRIDGE_DATA") or Path(__file__).parent)
+CERTS = Path(os.environ.get("IPADBRIDGE_CERTS") or DATA / "certs")
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 80
 TLS_PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 443
 FFMPEG = os.environ.get("FFMPEG", "ffmpeg")
@@ -1094,7 +1097,7 @@ if __name__ == "__main__":
     # para diagnosticar después sin estar mirando la ventana.
     from logging.handlers import RotatingFileHandler
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    file_handler = RotatingFileHandler(Path(__file__).parent / "server.log", maxBytes=5_000_000, backupCount=2, encoding="utf-8")
+    file_handler = RotatingFileHandler(DATA / "server.log", maxBytes=5_000_000, backupCount=2, encoding="utf-8")
     file_handler.setFormatter(fmt)
     logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler(), file_handler])
     for h in logging.getLogger().handlers:

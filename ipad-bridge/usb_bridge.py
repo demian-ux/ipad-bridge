@@ -307,6 +307,8 @@ class Session:
         new.write(frame(T_PING, b""))
         await new.drain()
         await self.send_shortcuts(new)
+        await self.ws.send_str(json.dumps({"type": "transport", "transport": new.transport}))
+        await self.ws.send_str(json.dumps({"type": "need-key"}))   # la app empieza de cero en la conexión nueva
 
     async def send_shortcuts(self, link):
         """static/shortcuts.json a la app (perfiles de la barra y gestos); una app vieja ignora el tipo."""
@@ -314,8 +316,6 @@ class Session:
         if sc:
             link.write(frame(T_CTRL_DOWN, sc))
             await link.drain()
-        await self.ws.send_str(json.dumps({"type": "transport", "transport": new.transport}))
-        await self.ws.send_str(json.dumps({"type": "need-key"}))   # la app empieza de cero en la conexión nueva
 
 
 async def run(target, ws_url, fallback_ip=None):
