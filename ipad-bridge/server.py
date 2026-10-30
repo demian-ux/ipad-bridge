@@ -827,7 +827,24 @@ app.router.add_get("/ws", ws_handler)
 app.router.add_static("/", STATIC, show_index=False)
 
 
+def refresh_app_zip():
+    """static/iPadBridge.swiftpm.zip (la descarga de la página de instalación) se regenera desde app/iPadBridge.swiftpm
+    si alguna fuente es más nueva, con tools/make_app_zip.py (rutas con "/", que Archivos del iPad sí abre)."""
+    try:
+        import importlib.util
+        path = Path(__file__).parent / "tools" / "make_app_zip.py"
+        spec = importlib.util.spec_from_file_location("make_app_zip", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        names = mod.build_if_stale()
+        if names is not None:
+            log.info("iPadBridge.swiftpm.zip regenerado (%d archivos)", len(names))
+    except Exception:
+        log.exception("no pude regenerar iPadBridge.swiftpm.zip (sigo con el que hay)")
+
+
 async def main():
+    refresh_app_zip()
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()

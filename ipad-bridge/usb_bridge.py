@@ -17,18 +17,35 @@ import json
 import socket
 import struct
 import sys
+from pathlib import Path
 
 import aiohttp
 
 APP_PORT = 7777
+SHORTCUTS = Path(__file__).parent / "static" / "shortcuts.json"
 T_PING, T_VIDEO, T_CONFIG, T_STILL, T_STILLCLEAR, T_INPUT, T_NEEDKEY = 0, 1, 2, 3, 4, 16, 17
-T_CTRL_UP, T_CTRL_DOWN = 18, 19      # JSON de control tal cual va por el WebSocket: iPad->PC (ping, stats, quality), PC->iPad (pong)
+T_CTRL_UP, T_CTRL_DOWN = 18, 19      # JSON de control tal cual va por el WebSocket: iPad->PC (ping, stats, quality), PC->iPad (pong, app)
 CTRL_UP_TYPES = {"ping", "stats", "quality", "need-key"}
-CTRL_DOWN_TYPES = {"pong"}
+# PC->iPad: pong (reloj), app (ventana activa de Windows: perfil de la barra), shortcuts (si algún día lo manda el servidor).
+# Una app vieja ignora los tipos que no conoce.
+CTRL_DOWN_TYPES = {"pong", "app", "shortcuts"}
 
 
 def frame(t, payload):
     return struct.pack(">IB", 1 + len(payload), t) + payload
+
+
+def shortcuts_msg():
+    """static/shortcuts.json como JSON de control {"type":"shortcuts", gestures, profiles} para la app nativa, que arma
+    la barra de teclas y los gestos con los mismos perfiles que la página. None si falta o está roto (la app usa el suyo)."""
+    try:
+        d = json.loads(SHORTCUTS.read_text(encoding="utf-8"))
+        d.pop("_", None)                  # los comentarios del archivo no viajan
+        d["type"] = "shortcuts"
+        return json.dumps(d, ensure_ascii=False).encode("utf-8")
+    except (OSError, ValueError) as e:
+        print(f"[usb] shortcuts.json no se pudo leer ({e}); la app usa su barra embebida")
+        return None
 
 
 async def usb_device():
@@ -94,6 +111,10 @@ async def run(target, ws_url, fallback_ip=None):
             transport = "net" if getattr(writer, "_via_net", False) or (target not in ("usb", "auto")) else "usb"
             await ws.send_str(json.dumps({"type": "hello", "role": "ipad", "transport": transport}))
             print(f"[usb] registrado como visor en {ws_url}")
+            sc = shortcuts_msg()              # perfiles de la barra y gestos: en cada conexión, así los cambios al JSON llegan al reconectar
+            if sc:
+                writer.write(frame(T_CTRL_DOWN, sc))
+                await writer.drain()
 
             async def ws_to_ipad():
                 async for msg in ws:

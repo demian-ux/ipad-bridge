@@ -12,10 +12,13 @@ import AVFoundation
 //   tipo 16 iPad->PC input: JSON. Dedos: {"ev":"move|down|up|scroll","x":0..1,"y":0..1,"btn":0|2,"dy":..,"dx":..}
 //     Pencil ("pen":1): {"ev":"hover|down|up","x","y","p":presión 0..1,"tx","ty":inclinación en grados},
 //     {"ev":"moves","pts":[[x,y,p,tx,ty],...]} (toques coalescidos), {"ev":"leave"}, {"ev":"eraser","on":bool}
-//     Barra de teclas (sin "pen"): {"ev":"key","keys":"ctrl+z"} pulsación, {"ev":"mod","key":"shift|ctrl|alt|space","down":bool}
+//     Barra de teclas (sin "pen"): {"ev":"key","keys":"ctrl+z"} pulsación, {"ev":"mod","key":"shift|ctrl|alt|space","down":bool},
+//     {"ev":"text","text":"hola"} texto del teclado; {"ev":"pencfg","gamma","min","smooth"} curva de presión (al conectar y al cambiar)
 //   tipo 17 iPad->PC need-key: pedir keyframe
 //   tipo 18 iPad->PC JSON de control: {"type":"ping","t":reloj iPad ms,"q","d","rtt"} cada 2 s, {"type":"stats",...} cada 5 s
-//   tipo 19 PC->iPad JSON de control: {"type":"pong","t","mt":reloj PC ms,"inp50","inp95",...}
+//   tipo 19 PC->iPad JSON de control: {"type":"pong","t","mt":reloj PC ms,"inp50","inp95",...},
+//     {"type":"app","exe","title"} ventana activa de Windows (perfil de la barra), {"type":"shortcuts",gestures,profiles}
+//     el contenido de static/shortcuts.json (lo manda usb_bridge.py al conectar; sin él la app usa el perfil embebido)
 //   Reloj sincronizado estilo NTP (offset de la muestra de menor RTT de las últimas 15); el input lleva "t" en el reloj
 //   de la PC para medir la latencia de input, y cada frame trae ts (f64, reloj de la PC en ms al salir del encoder).
 
@@ -25,7 +28,26 @@ final class Bridge: ObservableObject {
     @Published var status = "Esperando a la PC…"
     @Published var hud = ""
     @Published var addresses = ""
-    @Published var penHud = ""      // "GOMA" mientras el doble toque del Pencil tiene la goma activa
+    @Published var penHud = ""      // gesto activo, presión en vivo ("pen 0.42→0.50") o "GOMA" (doble toque del Pencil)
+
+    // Barra de teclas por aplicación: perfiles de shortcuts.json (o el embebido), ventana activa que manda la PC,
+    // perfil elegido (automático por ejecutable, o a mano tocando la etiqueta hasta el próximo cambio de app).
+    @Published var shortcuts = Shortcuts.fallback
+    @Published var appExe = ""
+    @Published var appTitle = ""
+    @Published var profileIndex = 0
+    @Published var manualProfile = false
+    @Published var keyboardOn = false    // el campo oculto del teclado es primer respondedor
+    @Published var panelOpen = false     // panel ⚙ visible (solo entonces se publica la presión en vivo)
+    @Published var penRaw = 0.0          // presión cruda del Pencil para el panel (acotada a ~15 Hz)
+    let settings = Settings()
+    /// Gestos del perfil activo ya mezclados; lo lee la vista del video en cada toque.
+    private(set) var gestureConfig = Shortcuts.fallback.gestureConfig(profileIndex: 0, palmRadius: nil)
+    // Estado compartido entre la barra (SwiftUI) y la vista del video (UIKit); solo se toca en el hilo principal.
+    var barMouseBtn: Int?                // botón del mouse mantenido desde la barra: el Pencil actúa como ese botón
+    var barMouseUsed = false             // el Pencil dibujó con él (al soltar no se manda un clic suelto)
+    var penDown = false
+    var profile: ShortcutProfile { shortcuts.profiles[min(profileIndex, shortcuts.profiles.count - 1)] }
 
     private var listener: NWListener?
     private var conn: NWConnection?
@@ -52,6 +74,66 @@ final class Bridge: ObservableObject {
     var onSample: ((CMSampleBuffer) -> Void)?
     var onFlush: (() -> Void)?
     var onStill: ((Data?) -> Void)?   // PNG, o nil para volver al video
+    var onKeyboardClosed: (() -> Void)?   // el campo del teclado dejó de ser primer respondedor
+    private var penCfgWork: DispatchWorkItem?
+
+    init() {
+        settings.onPenChange = { [weak self] in self?.schedulePenCfg() }
+        settings.onGestureChange = { [weak self] in self?.refreshGestures() }
+    }
+
+    /// pencfg al servidor, agrupando los movimientos del deslizador (80 ms, como la página).
+    private func schedulePenCfg() {
+        penCfgWork?.cancel()
+        let w = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.sendInput(self.settings.penConfigMessage)
+        }
+        penCfgWork = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: w)
+    }
+
+    // MARK: - Perfil de la barra
+
+    func refreshGestures() {
+        gestureConfig = shortcuts.gestureConfig(profileIndex: profileIndex, palmRadius: settings.palmRadius >= 0 ? settings.palmRadius : nil)
+    }
+
+    /// Elige el perfil por la app activa (salvo que esté fijado a mano) y recalcula los gestos. Hilo principal.
+    func pickProfile() {
+        if !manualProfile { profileIndex = shortcuts.profileIndex(forExe: appExe) }
+        if profileIndex >= shortcuts.profiles.count { profileIndex = 0 }
+        refreshGestures()
+    }
+
+    /// Tocar la etiqueta del perfil: el siguiente, fijado a mano hasta el próximo cambio de aplicación.
+    func nextProfile() {
+        manualProfile = true
+        profileIndex = (profileIndex + 1) % shortcuts.profiles.count
+        refreshGestures()
+    }
+
+    func autoProfile() {
+        manualProfile = false
+        pickProfile()
+    }
+
+    private func handleApp(_ m: [String: Any]) {
+        DispatchQueue.main.async {
+            self.appExe = (m["exe"] as? String) ?? ""
+            self.appTitle = (m["title"] as? String) ?? ""
+            self.manualProfile = false
+            self.pickProfile()
+        }
+    }
+
+    private func handleShortcuts(_ m: [String: Any]) {
+        guard let sc = Shortcuts(json: m) else { return }
+        DispatchQueue.main.async {
+            self.shortcuts = sc
+            self.pickProfile()
+        }
+    }
 
     func start() {
         guard listener == nil else { return }
@@ -131,6 +213,7 @@ final class Bridge: ObservableObject {
             case .ready:
                 DispatchQueue.main.async { self.status = "PC conectada, esperando video…" }
                 self.send(type: 17, payload: Data())
+                self.sendInput(self.settings.penConfigMessage)   // curva de presión guardada: el servidor la aplica ya
                 self.readMessage()
             case .failed(let e):
                 DispatchQueue.main.async { self.status = "Conexión falló: \(e)" }
@@ -183,8 +266,13 @@ final class Bridge: ObservableObject {
         case 4:
             onStill?(nil)
         case 19:
-            if let m = try? JSONSerialization.jsonObject(with: Data(payload)) as? [String: Any], m["type"] as? String == "pong" {
-                handlePong(m)
+            if let m = try? JSONSerialization.jsonObject(with: Data(payload)) as? [String: Any] {
+                switch m["type"] as? String {
+                case "pong": handlePong(m)
+                case "app": handleApp(m)
+                case "shortcuts": handleShortcuts(m)
+                default: break      // tipos nuevos de un puente más nuevo: ignorar
+                }
             }
         case 1:
             guard let fmt = format, payload.count > 9 else { return }
@@ -236,6 +324,12 @@ final class Bridge: ObservableObject {
         if let now = serverNow { d["t"] = now }   // reloj de la PC estimado: la PC mide la latencia hasta inyectar
         guard let json = try? JSONSerialization.data(withJSONObject: d) else { return }
         send(type: 16, payload: json)
+    }
+
+    /// Clic de ese botón del mouse donde está el cursor (botón de la barra soltado sin haber dibujado).
+    func clickAtCursor(_ btn: Int) {
+        sendInput(["ev": "down", "btn": btn])
+        sendInput(["ev": "up", "btn": btn])
     }
 
     /// Mensaje JSON de control (ping, stats, quality) a la PC, tipo 18.

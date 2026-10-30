@@ -18,8 +18,8 @@ quieta se ven los píxeles exactos de Windows. El Pencil y los toques vuelven a 
 3. Pencil = lápiz de Windows (Windows Ink) con presión, inclinación, hover y botón lateral; Photoshop, Krita, Clip
    Studio (en modo Windows Ink) etc. lo ven como una tableta. Doble toque del Pencil (solo en la app) = goma (tecla E,
    otro toque = B). Mientras el Pencil toca, una línea fina sigue a la punta hasta que el video la alcanza
-   (previsualización local, se apaga o se cambia de color en el panel ⚙).
-   Dedos (página web; configurables en `static/shortcuts.json`): un dedo mueve el cursor, tap = clic, doble tap =
+   (previsualización local, en la página y en la app; se apaga o se cambia de color en el panel ⚙).
+   Dedos (página y app, configurables en `static/shortcuts.json`): un dedo mueve el cursor, tap = clic, doble tap =
    doble clic; dos dedos = scroll; tap de dos dedos = deshacer, de tres = rehacer. Dedos apoyados **antes** de que
    toque el Pencil, lejos de la punta, son un gesto mientras duren: uno = goma (E al tocar el Pencil, B al levantar
    el dedo), dos = el Pencil hace de botón medio (mover la vista), tres = botón derecho. Los dedos que llegan después
@@ -34,9 +34,10 @@ quieta se ven los píxeles exactos de Windows. El Pencil y los toques vuelven a 
    clic donde está el cursor). Abajo, fijos: ⌨ teclado en pantalla (también reenvía un teclado físico conectado al
    iPad), ⚙ panel de presión, previsualización, gestos y perfil, ✕ ocultar (queda una pestaña para volver). Toque
    largo en ≡ la pasa al otro borde (se recuerda). Las teclas van a la ventana activa de Windows. Si el visor se
-   desconecta, el servidor suelta los modificadores que hubieran quedado presionados. La app nativa conserva la barra
-   fija de siempre (modificadores, deshacer, rehacer, [ ], B, E), horizontal abajo del lienzo para no tapar la barra
-   de herramientas de Photoshop; toque largo en ≡ la rota (abajo → derecha → izquierda, se recuerda).
+   desconecta, el servidor suelta los modificadores que hubieran quedado presionados. La app nativa arma la misma
+   barra desde el mismo `shortcuts.json` (el puente USB se lo manda al conectarse, junto con la aplicación activa) y
+   cambia de perfil sola; va horizontal abajo del lienzo para no tapar la barra de herramientas de Photoshop y el toque
+   largo en ≡ la rota (abajo → derecha → izquierda, se recuerda). Tiene los mismos ⌨, ⚙ y ocultar.
 
 ## Instalar en otra PC (Windows 11 + GPU NVIDIA)
 
@@ -61,8 +62,8 @@ Si la IP de la PC cambia, `start.ps1` reemite el certificado del servidor solo; 
   NVENC no sostiene 2732x2048 HEVC 10b a 120 fps con movimiento real y el video se traba.
 - iPad: abrí http://192.168.1.15/ y seguí los pasos: instalar el certificado (perfil) y activar su confianza en
   Ajustes > General > Información > Ajustes de confianza de certificados. WebCodecs solo existe en https.
-- App nativa (opcional, para cable): desde esa misma página bajá iPadBridge.swiftpm.zip, descomprimilo en Archivos
-  y abrilo con Swift Playgrounds. Escucha TCP en 7777; `usb_bridge.py` la conecta al servidor por IP o por USB
+- App nativa (opcional, para cable): desde esa misma página bajá iPadBridge.swiftpm.zip (el servidor lo regenera al
+  arrancar si cambiaron las fuentes), descomprimilo en Archivos y abrilo con Swift Playgrounds. Escucha TCP en 7777; `usb_bridge.py` la conecta al servidor por IP o por USB
   (USB requiere la app "Dispositivos Apple" de Microsoft Store).
 
 ## Pencil como tableta (lápiz virtual)
@@ -90,10 +91,13 @@ pincel sigue al lápiz sin tocar), `leave` cuando se aleja, y la goma del doble 
   con 1; se abre con la velocidad, así los trazos rápidos no se retrasan). 0 = apagado. El filtro arranca en cada
   trazo desde el punto real y levanta donde quedó la posición filtrada. Con valores altos se nota el retraso en los
   trazos lentos; probar entre 0.2 y 0.5.
-- Previsualización local del trazo (página web): el input llega a la PC antes de que vuelva el video, así que el iPad
+- Previsualización local del trazo (página y app): el input llega a la PC antes de que vuelva el video, así que el iPad
   dibuja una línea fina (color, grosor y duración en el panel; 70 ms por defecto, unos 4 frames) sobre el video
-  siguiendo al Pencil, con los puntos predichos de Safari (`getPredictedEvents`) más tenues; cada tramo se desvanece
-  con su edad y al levantar el lápiz o cambiar de herramienta no queda nada.
+  siguiendo al Pencil, con los puntos predichos (`getPredictedEvents` en Safari, `predictedTouches(for:)` en la app)
+  más tenues; cada tramo se desvanece con su edad y al levantar el lápiz o cambiar de herramienta no queda nada. En la
+  app es una capa de CAShapeLayers (uno por lote de toques coalescidos) cuya opacidad baja con un CADisplayLink.
+- El panel ⚙ de la app guarda lo mismo que el de la página (presión, previsualización, gestos, radio de palma) en
+  UserDefaults del iPad y manda `pencfg` al conectarse y al mover un control.
 - `PEN_TAP_KEYS` ("e,b"): atajos del doble toque del Pencil, "activar goma,volver". Windows no deja emular el lado goma
   de un lápiz sintético (las banderas INVERTED/ERASER no llegan a la app, medido), por eso va por teclado a la ventana activa.
 - `PEN_ARM_MS` (30) y `PEN_LEAVE_S` (1.5): en un iPad sin hover el Pencil "aparece" ya tocando. El servidor entra en
@@ -121,8 +125,12 @@ Más de 14 botones no entran en la pantalla del iPad.
 
 El servidor mira la ventana activa cada 0.5 s (`GetForegroundWindow` + nombre del ejecutable) y manda
 `{"type":"app","exe":"Photoshop.exe","title":"…"}` a los visores cuando cambia (y al conectarse). La página cambia de
-perfil sola; tocar la etiqueta del perfil lo fija a mano hasta el próximo cambio de aplicación. La app nativa no
-recibe este mensaje por ahora (el puente USB no lo reenvía) y conserva su barra fija.
+perfil sola; tocar la etiqueta del perfil lo fija a mano hasta el próximo cambio de aplicación. A la app nativa le
+llega por `usb_bridge.py` como JSON de control (tipo 19), y al conectarse el puente le manda además el contenido de
+`shortcuts.json` como `{"type":"shortcuts",gestures,profiles}`: la app arma la barra y los gestos desde ahí (con un
+perfil genérico embebido si no llega nada, p. ej. con un puente viejo). Editar el JSON y reconectar el puente (o
+relanzar `start.ps1`) alcanza para que la app lo tome. En la app, `palmSize` se compara con `majorRadius` de UIKit
+(el radio del contacto en puntos, menor que el ancho que informa Safari): un dedo normal nunca llega; una palma sí.
 
 Gestos (`gestures` en el JSON, los del perfil se mezclan con los generales): `tapMs` 250, `doubleMs` 300, `tapPx` 10,
 `palmRadius` 180 (dedos a menos de esos px CSS de donde cae el Pencil son palma; 0 = no distinguir; también en el
@@ -136,7 +144,9 @@ Teclado: el botón ⌨ enfoca un campo oculto; el iPad muestra su teclado en pan
 escribe en él. Letras y signos van como texto (`{"ev":"text"}`, el servidor los escribe con `KEYEVENTF_UNICODE`, así
 no dependen de la distribución de Windows ni de Bloq Mayús); Intro, Tab, Esc, flechas, Supr, Inicio/Fin, Re/Av Pág,
 F1-F12 y cualquier tecla con Ctrl/Alt/Cmd van como atajo (`{"ev":"key"}`, Cmd = Win). Un cartel abajo avisa que el
-teclado está activo; ⌨ de nuevo lo cierra.
+teclado está activo; ⌨ de nuevo lo cierra. En la app es una vista `UIKeyInput` invisible (texto por `insertText`,
+Intro/Borrar por el mismo camino, teclas especiales y atajos por `pressesBegan`); con el teclado cerrado, la vista del
+video es primer respondedor y un teclado físico conectado al iPad escribe igual, sin abrir el de pantalla.
 
 Sin iPad: `python tools/pen_probe.py` abre una ventana en el monitor objetivo que muestra lo que Windows entrega por
 WM_POINTER (presión 0..1024, inclinación, banderas), los botones del mouse, la rueda y las teclas que llegan, y dibuja
@@ -165,7 +175,13 @@ Pencil (presión 0.5) para probar la previsualización y el panel.
 - `static/ipad.html`: decodificador WebCodecs + Pencil/toques, previsualización del trazo, gestos, barra por
   aplicación, panel de presión y teclado. `static/shortcuts.json`: perfiles de la barra y gestos.
   `static/setup.html`: guía del iPad.
-- `app/iPadBridge.swiftpm`: app nativa (AVSampleBufferDisplayLayer + Network). `usb_bridge.py`: su puente.
+- `app/iPadBridge.swiftpm`: app nativa (AVSampleBufferDisplayLayer + Network): `Bridge.swift` protocolo, reloj y
+  perfiles; `VideoView.swift` video, Pencil, dedos y gestos; `StrokePreview.swift` previsualización; `Shortcuts.swift`
+  modelo de `shortcuts.json`; `Settings.swift` ajustes persistentes; `Panel.swift` panel ⚙; `Keyboard.swift` teclado;
+  `MyApp.swift` barra y pantalla. `usb_bridge.py`: su puente (reenvía `app`, manda `shortcuts` al conectar).
+- `tools/make_app_zip.py`: regenera `static/iPadBridge.swiftpm.zip` desde las fuentes de la app con rutas `/` (el
+  `Compress-Archive` de PowerShell las escribe con `\` y Archivos del iPad no abre el paquete); `server.py` lo llama
+  al arrancar si alguna fuente es más nueva que el zip. `--force` lo rehace siempre.
 - `certs/`: CA propia y certificado del servidor para 192.168.1.15. Si cambia la IP, reemitir `server.crt`.
 - `tools/fake_app.py`: simula la app nativa en la PC para probar el puente sin iPad.
 - `tools/pen_probe.py`: ventana que muestra el lápiz (WM_POINTER), botones, rueda y teclas que llegan a Windows.
@@ -183,7 +199,8 @@ mode}` cada 5 s (va al log del servidor y a pc.html), `{"type":"quality","mode":
 `{"type":"need-key"}` para pedir un IDR. Cada `input` lleva `t` = reloj del servidor estimado por el visor.
 Protocolo app nativa: TCP, u32 largo + u8 tipo + payload (0 ping, 1 video, 2 config = u8 códec 1 avcC/2 hvcC + record,
 3 imagen fija PNG, 4 still-clear, 16 input JSON, 17 need-key, 18 JSON de control iPad→PC: ping/stats/quality tal cual,
-19 JSON de control PC→iPad: pong).
+19 JSON de control PC→iPad: pong y app tal cual, más `{"type":"shortcuts",gestures,profiles}` que arma el puente con
+`static/shortcuts.json` al conectar; una app vieja ignora los tipos que no conoce).
 Input JSON (igual por WebSocket, con `"type":"input"`): dedos `{"ev":"move|down|up|scroll","x","y","btn","dy","dx"}`
 (`btn` 0 izquierdo, 1 medio, 2 derecho; `down`/`up` sin `x`,`y` = en la posición actual del cursor);
 Pencil con `"pen":1`: `{"ev":"hover|down|up","x","y","p":0..1,"tx","ty":grados,"btn":2 = botón lateral}`,
@@ -287,7 +304,8 @@ puerto sin TLS y falla incluso la página http. Con 80/443 aterriza en el 443, d
   "Medición"): el HUD da el tramo encoder → pantalla y la latencia de input; el tramo captura → encoder se mide con
   `tools/latency_clock.py`.
 - Teclado: el campo oculto recibe lo que el iPad decide mandar; la autocorrección está apagada pero algunos atajos
-  del sistema (Cmd+H, Cmd+Tab) no llegan a Safari. La app nativa no tiene teclado ni gestos nuevos todavía.
+  del sistema (Cmd+H, Cmd+Tab) no llegan a Safari ni a la app. En la app, Option+letra manda el atajo `alt+letra` y
+  descarta el carácter alternativo que iOS inserta (ventana de 50 ms).
 - La app tiene que estar en primer plano en el iPad; iOS la suspende en segundo plano.
 - Keyframes: con intra-refresh no hay IDR periódicos; un visor nuevo pide uno y el encoder se reinicia (~0,3 s
   hasta la imagen), lo que congela ese instante a los demás visores. `KEYFRAMES=idr` si se prefiere el keyframe por
