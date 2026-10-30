@@ -197,7 +197,9 @@ if (-not $NoSource) {
 }
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 
-$serving = Get-NetTCPConnection -LocalPort 443 -State Listen -ErrorAction SilentlyContinue
+# ¿Está el servidor? (Get-NetTCPConnection no siempre lista el socket de Python; probar a conectar es más fiable.)
+$serving = $false
+try { $c = New-Object Net.Sockets.TcpClient; $c.Connect("127.0.0.1", 443); $serving = $c.Connected; $c.Close() } catch { $serving = $false }
 Write-Host ""
 Write-Host "Listo. En el iPad (con el servidor de la PC corriendo" -NoNewline
 if (-not $serving) { Write-Host "; ahora no escucha en 443: arrancalo con start.ps1 o el icono de la bandeja" -ForegroundColor Yellow -NoNewline }
