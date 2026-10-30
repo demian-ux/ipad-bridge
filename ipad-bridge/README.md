@@ -161,14 +161,15 @@ En el iPad (iPadOS 17/18):
    configuración de VPN. Tiene que estar conectada al instalar y al renovar.
 8. SideStore → iniciar sesión con el mismo Apple ID → My Apps → tocar "7 DAYS" para renovar (aceptar si pide revocar o
    crear el certificado).
-9. Agregar la fuente de iPad Bridge: SideStore → Sources → + → `https://github.com/<usuario>/ipad-bridge/releases/latest/download/source.json`
+9. Agregar la fuente de iPad Bridge: SideStore → Sources → + → `https://github.com/demian-ux/ipad-bridge/releases/latest/download/source.json`
    (los Releases) o `https://<IP de la PC>/sidestore.json` (el último build que bajó `install_ipa.ps1`, abajo). La app
    aparece en Browse → Install. La primera vez el perfil del desarrollador vuelve a pedir confianza (paso 5).
 10. Abrir iPad Bridge. Como pidió el permiso de red local, la primera vez pregunta; aceptar.
 
 ### Flujo diario
 
-1. Editar la app, push. GitHub → Actions → "IPA de la app del iPad" en verde (unos 5-10 minutos en el runner).
+1. Editar la app, push. GitHub → Actions (https://github.com/demian-ux/ipad-bridge/actions) → "IPA de la app del
+   iPad" en verde (unos 3-5 minutos en el runner).
 2. En la PC, con el servidor corriendo:
    `powershell -ExecutionPolicy Bypass -File C:\Users\dszkl\ipad-link\ipad-bridge\tools\install_ipa.ps1`
    Baja el IPA de la última corrida verde de la rama actual (`-Branch main` para otra, `-Release` o `-Tag v0.2.0` para
