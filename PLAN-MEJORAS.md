@@ -262,7 +262,7 @@ al final lo que necesita driver firmado o app nativa completa. Esfuerzos estimad
 | 1.5 | Liveness ping/pong, `need-key` al volver del fondo, `sleeping/closing`, backoff | server.py, ipad.html, app, usb_bridge.py | 1–2 días |
 | 1.6 | Migración Wi-Fi→USB en caliente y "el cable manda" | usb_bridge.py, server.py | 1–2 días |
 | 1.7 | Bitrate/escala adaptativos por cola, Mbps y RTT; preset manual dibujo/movimiento | server.py, ipad.html | 2 días |
-| 1.8 | Instalador único (Inno Setup) + app de bandeja con autostart | setup.ps1 → instalador, nuevo tray.py | 3 días |
+| 1.8 | Instalador único (Inno Setup) + app de bandeja con autostart. Hecho el 30/10/2026: `tray.py` e `installer/` (Python embebido, ffmpeg, driver, firewall, Dispositivos Apple); `setup.ps1` y `start.ps1` quedan para desarrollo | tray.py, installer/ | 3 días |
 
 ### Fase 2: modos y app nativa (3–4 semanas)
 

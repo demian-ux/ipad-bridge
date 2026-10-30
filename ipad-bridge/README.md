@@ -8,9 +8,13 @@ quieta se ven los píxeles exactos de Windows. El Pencil y los toques vuelven a 
 
 ## Uso diario
 
-1. PC: `.\start.ps1` levanta el servidor (80/443) y el puente en modo `auto`: USB si el iPad está por cable
-   (requiere la app "Dispositivos Apple" y haber tocado Confiar en el iPad), si no Wi-Fi; cambia solo.
-   Bitrate automático: 100 Mbps por USB, 50 si algún visor va por red.
+1. PC: el icono de iPad Bridge en la bandeja (instalado con el instalador arranca con Windows; en desarrollo,
+   `.\start.ps1` o `pythonw tray.py`) levanta el servidor (80/443) y el puente en modo `auto`: USB si el iPad está
+   por cable (requiere la app "Dispositivos Apple" y haber tocado Confiar en el iPad), si no Wi-Fi; cambia solo.
+   Bitrate automático: 100 Mbps por USB, 50 si algún visor va por red. El icono dice el estado (gris sin iPad, verde
+   por USB, azul por red, rojo servidor caído) y su menú muestra visores, fps y Mbps, abre el panel y los logs,
+   fija la IP de respaldo del iPad, ubica el monitor virtual, activa "Iniciar con Windows", reinicia el servidor o
+   sale (cierra servidor, puente y ffmpeg).
 2. iPad: abrí https://192.168.1.15/ipad.html en Safari, o la app iPadBridge de Playgrounds. La captura arranca
    sola al conectarse el primer visor y se detiene con el último. http://localhost/ muestra el estado, la calidad
    actual y lo que mide el iPad. En la página, el HUD de arriba a la derecha muestra fps y latencias (ver "Medición")
@@ -38,14 +42,54 @@ quieta se ven los píxeles exactos de Windows. El Pencil y los toques vuelven a 
    fija de siempre (modificadores, deshacer, rehacer, [ ], B, E), horizontal abajo del lienzo para no tapar la barra
    de herramientas de Photoshop; toque largo en ≡ la rota (abajo → derecha → izquierda, se recuerda).
 
-## Instalar en otra PC (Windows 11 + GPU NVIDIA)
+## Instalar con el instalador (Windows 11 + GPU NVIDIA)
+
+1. Ejecutá `iPadBridge-Setup-<versión>.exe` (lo genera `installer\build.ps1`, ver "Construir el instalador"). Pide
+   administrador una vez e instala en `C:\Program Files\iPad Bridge`: Python embebido con las librerías, ffmpeg,
+   el código, el driver del monitor virtual (Virtual Display Driver, firmado; con su configuración en
+   `C:\VirtualDisplayDriver`), la regla de firewall para 80/443 en redes privadas, "Dispositivos Apple" desde
+   Microsoft Store (winget; si falla, instalala a mano desde la tienda), y ubica el monitor virtual a la izquierda
+   a 120 Hz con escala 225 %. Cada paso es una casilla del instalador. Accesos directos en el menú Inicio y, si se
+   deja marcado, en Inicio de Windows (arranca con la sesión).
+2. Al terminar arranca el icono de la bandeja. En el primer arranque genera la CA y el certificado para la IP de
+   esa PC en `%LOCALAPPDATA%\iPad Bridge\certs` (ahí van también `config.json` y los logs `tray.log`,
+   `server.log`, `server.out.log`, `bridge.log`, `bridge.err`; "Abrir carpeta de logs" en el menú).
+3. En el iPad: `http://<IP de la PC>/` ("Dirección para el iPad" en el menú) → instalar certificado y activar su
+   confianza → app o página https. Por USB: conectar, tocar Confiar en el iPad y abrir la app Dispositivos Apple
+   una vez. Si el iPad va a usarse por Wi-Fi con la app nativa, poné su IP en "IP de respaldo del iPad".
+4. Si la IP de la PC cambia, la bandeja reemite el certificado del servidor al arrancar o con "Reiniciar servidor";
+   el iPad no necesita nada nuevo.
+
+Desinstalar: Configuración > Aplicaciones > iPad Bridge. Cierra la bandeja, quita la regla de firewall y pregunta
+si borrar también el driver del monitor virtual (`installer\scripts\uninstall-vdd.ps1`, se puede correr a mano) y los
+datos de `%LOCALAPPDATA%\iPad Bridge`. Con `/CURRENTUSER` el instalador no pide administrador para los archivos
+(van a `%LOCALAPPDATA%\Programs\iPad Bridge`); el driver y el firewall se elevan solos igual.
+
+### Construir el instalador (en la PC de desarrollo)
+
+```
+powershell -ExecutionPolicy Bypass -File C:\Users\dszkl\ipad-link\ipad-bridge\installer\build.ps1
+```
+
+Necesita Python 3.12 (el del proyecto), el ffmpeg full de gyan.dev instalado (`setup.ps1` lo deja), Inno Setup 6
+(`winget install JRSoftware.InnoSetup`) e internet la primera vez. `build.ps1` baja el Python embebido 3.12 a
+`installer\vendor\python` y le instala con pip las librerías (`--target`), copia el ffmpeg instalado (verifica
+ddagrab y hevc_nvenc), baja el driver y nefcon con `install-vdd.ps1 -DownloadOnly`, arma `installer\payload\` (código,
+`static`, `tools`, `installer\scripts`, runtime, ffmpeg, driver, icono generado por `tray.py`) y compila
+`installer\ipad-bridge.iss` a `installer\dist\iPadBridge-Setup-<versión>.exe` (la versión es `0.1.<commits>` o
+`-Version x.y.z`). `-NoCompile` deja solo `payload\` para revisar. Para probar sin tocar el driver ni el monitor de
+esta PC: `iPadBridge-Setup-x.exe /CURRENTUSER /SILENT /DIR="C:\ruta\de\prueba" /MERGETASKS="!vdd,!placevdd,!appledevices,!firewall,!startup"`.
+`vendor\`, `payload\` y `dist\` no van al repositorio.
+
+## Instalar a mano, para desarrollo (Windows 11 + GPU NVIDIA)
 
 1. Copiá la carpeta del proyecto (o descomprimí `ipad-bridge.zip`) en, por ejemplo, `C:\ipad-bridge`.
 2. En PowerShell, dentro de esa carpeta: `powershell -ExecutionPolicy Bypass -File .\setup.ps1`.
    Instala Python, ffmpeg y "Dispositivos Apple" si faltan (winget), las librerías de Python, el monitor virtual
    (pide administrador una vez), genera los certificados para la IP de esa PC y ubica el monitor a la izquierda.
-3. `.\start.ps1` (agregá la IP del iPad si querés respaldo por red). Windows pregunta por el firewall la primera
-   vez: permitir en redes privadas.
+3. `.\start.ps1` (agregá la IP del iPad si querés respaldo por red) abre la consola del servidor; `pythonw tray.py [IP]`
+   hace lo mismo desde la bandeja, sin consola (requiere `pip install pystray`; datos y logs quedan en la carpeta del
+   proyecto). Windows pregunta por el firewall la primera vez: permitir en redes privadas.
 4. En el iPad: `http://<IP de la PC>/` → instalar certificado y activar su confianza → app o página https.
    Por USB: conectar, tocar Confiar en el iPad y abrir la app Dispositivos Apple una vez.
 Si la IP de la PC cambia, `start.ps1` reemite el certificado del servidor solo; el iPad no necesita nada nuevo.
@@ -166,6 +210,14 @@ Pencil (presión 0.5) para probar la previsualización y el panel.
   aplicación, panel de presión y teclado. `static/shortcuts.json`: perfiles de la barra y gestos.
   `static/setup.html`: guía del iPad.
 - `app/iPadBridge.swiftpm`: app nativa (AVSampleBufferDisplayLayer + Network). `usb_bridge.py`: su puente.
+- `tray.py`: icono de bandeja (pystray) que lanza servidor y puente como `start.ps1`, los vigila y relanza, muestra el
+  estado que `server.py` manda por WebSocket (`hello` con `role: status` y mensajes `status`, lo mismo que `pc.html`)
+  y los cierra al salir (van en un job object: mueren con la bandeja). Instalado, usa `IPAD_BRIDGE_DATA` =
+  `%LOCALAPPDATA%\iPad Bridge` para certificados, `config.json` y logs; `server.py` y `make_certs.py` respetan esa
+  variable. `--port`/`--tls-port` para probar en otros puertos.
+- `installer/`: `ipad-bridge.iss` (Inno Setup), `build.ps1` (arma `payload\` y compila), `scripts/postinstall.ps1`
+  (firewall, Dispositivos Apple, driver vía `install-vdd.ps1`, `place_vdd.py`), `scripts/stop-tray.ps1` (cierra lo
+  que corra desde la carpeta instalada) y `scripts/uninstall-vdd.ps1` (quita el driver).
 - `certs/`: CA propia y certificado del servidor para 192.168.1.15. Si cambia la IP, reemitir `server.crt`.
 - `tools/fake_app.py`: simula la app nativa en la PC para probar el puente sin iPad.
 - `tools/pen_probe.py`: ventana que muestra el lápiz (WM_POINTER), botones, rueda y teclas que llegan a Windows.

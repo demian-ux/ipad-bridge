@@ -3,6 +3,7 @@ Sin openssl: usa el paquete `cryptography`. La CA se reutiliza si ya existe (el 
 el certificado del servidor se reemite si falta, venció o cambió la IP.   Uso: python tools/make_certs.py [IP]"""
 import datetime as dt
 import ipaddress
+import os
 import socket
 import sys
 from pathlib import Path
@@ -12,7 +13,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-CERTS = Path(__file__).resolve().parent.parent / "certs"
+CERTS = Path(os.environ.get("IPAD_BRIDGE_DATA") or Path(__file__).resolve().parent.parent) / "certs"   # igual que server.py
 
 
 def local_ip():
