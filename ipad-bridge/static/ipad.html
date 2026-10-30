@@ -14,6 +14,13 @@
  #hud{position:fixed;top:8px;right:12px;color:#6f6;font:12px ui-monospace,monospace;opacity:.7;pointer-events:auto;touch-action:none;
       padding:2px 6px;border-radius:6px;background:rgba(0,0,0,.35);-webkit-tap-highlight-color:transparent;z-index:6}
  #hud b{color:#ff6;font-weight:600}
+ /* Emparejamiento: el servidor pide el código de 6 dígitos que muestra la PC (http://localhost/) */
+ #pair{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);background:#1a1a1a;color:#eee;padding:24px 28px;border-radius:16px;
+      font:18px system-ui;text-align:center;z-index:10;-webkit-user-select:auto;user-select:auto;max-width:380px;border:1px solid rgba(255,255,255,.12)}
+ #pair .hint{color:#aaa;font-size:14px;line-height:1.5;margin:8px 0 14px}
+ #pair input{font:700 30px ui-monospace,monospace;letter-spacing:5px;width:190px;text-align:center;background:#000;color:#fff;border:1px solid #444;border-radius:10px;padding:8px}
+ #pair button{font:600 17px system-ui;background:#2d6cdf;color:#fff;border:0;border-radius:10px;padding:10px 18px;margin-left:8px}
+ #pair .err{color:#f66;font-size:14px;margin-top:10px;min-height:1em}
  /* Barra de teclas (estilo ExpressKeys): tira vertical en un borde, encima del área de dibujo */
  #bar{position:fixed;top:50%;left:6px;transform:translateY(-50%);display:flex;flex-direction:column;gap:4px;padding:4px;
       background:rgba(0,0,0,.45);border:1px solid rgba(255,255,255,.12);border-radius:14px;touch-action:none;z-index:5}
@@ -58,6 +65,12 @@
 <canvas id="ov"></canvas>
 <div id="pad"></div>
 <div id="msg">Conectando con la PC…</div>
+<form id="pair" hidden>
+ <div>Código de emparejamiento</div>
+ <div class="hint">Está en la página de estado de la PC (http://localhost/). Escanear el QR de esa página lo escribe solo.</div>
+ <input id="code" inputmode="numeric" pattern="[0-9 ]*" maxlength="7" autocomplete="one-time-code" placeholder="000 000"><button>Emparejar</button>
+ <div id="pairerr" class="err"></div>
+</form>
 <div id="hud"></div>
 <div id="bar">
  <button class="grip" data-grip title="toque largo: cambiar de lado">≡</button>
@@ -108,6 +121,7 @@ let pingTimer=0, statsTimer=0;
 const meas={e2e:[],pres:[],presented:0,drops:0,dropsSincePing:0,bytes:0,lastTs:0};
 function sendPing(){
   if(!ws||ws.readyState!==1)return;
+  if(lastRx&&performance.now()-lastRx>5000&&!document.hidden){drop(ws);return;}   // 5 s sin bytes: la PC se fue
   ws.send(JSON.stringify({type:'ping',t:performance.now(),q:decoder?decoder.decodeQueueSize:0,d:meas.dropsSincePing,rtt:clock.rtt}));
   meas.dropsSincePing=0;
 }
@@ -131,25 +145,71 @@ hud.addEventListener('pointerdown',function(e){
   sendQuality();updateHud();
 });
 
+// ---- Conexión (ítems 1.3 y 1.5): emparejamiento con token de 30 días en localStorage (el código llega en #pair= desde el
+// ---- QR o se escribe a mano), corte a los 5 s sin bytes, reconexión con backoff (0,5 → 8 s), sleeping/wake al bloquear el
+// ---- iPad o volver del fondo (con need-key: el decodificador perdió el hilo mientras dormía), closing al cerrar la página. ----
+const pairBox=document.getElementById('pair'), codeIn=document.getElementById('code'), pairErr=document.getElementById('pairerr');
+let authed=false, backoff=500, lastRx=0, closing=false, reconnectTimer=0;
+const store={get:k=>{try{return localStorage.getItem(k);}catch(e){return null;}},set:(k,v)=>{try{v===null?localStorage.removeItem(k):localStorage.setItem(k,v);}catch(e){}}};
+const ctl=o=>{if(ws&&ws.readyState===1)ws.send(JSON.stringify(o));};
+function urlCode(){const m=/pair=(\d{6})/.exec(location.hash);return m?m[1]:null;}
 function connectWS(){
-  ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws');
-  ws.binaryType='arraybuffer';
-  ws.onopen=()=>{ws.send(JSON.stringify({type:'hello',role:'ipad'}));msg.textContent='Esperando que la PC comparta pantalla…';
-    sendQuality();sendPenCfg();
+  clearTimeout(reconnectTimer);reconnectTimer=0;
+  const w=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws');
+  ws=w;w.binaryType='arraybuffer';
+  w.onopen=()=>{
+    lastRx=performance.now();msg.textContent='Conectando con la PC…';
+    const h={type:'hello',role:'ipad',name:'Safari en iPad'}, tok=store.get('token'), code=urlCode();
+    if(tok)h.token=tok;if(code)h.code=code;
+    w.send(JSON.stringify(h));
     clock.samples=[];clock.offset=null;sendPing();clearInterval(pingTimer);pingTimer=setInterval(sendPing,2000);
     clearInterval(statsTimer);statsTimer=setInterval(sendStats,5000);};
-  ws.onclose=()=>{msg.textContent='Sin conexión con la PC, reintentando…';clearInterval(pingTimer);clearInterval(statsTimer);setTimeout(connectWS,1500);};
-  ws.onmessage=async e=>{
+  w.onclose=()=>drop(w);
+  w.onerror=()=>drop(w);
+  w.onmessage=async e=>{
+    lastRx=performance.now();
     if(e.data instanceof ArrayBuffer){
       if(new Uint8Array(e.data,0,1)[0]===2)showStill(e.data.slice(1));else onVideoChunk(e.data);
       return;}
     const m=JSON.parse(e.data);
-    if(m.type==='vconfig')await setupDecoder(m);
+    if(m.type==='welcome')onWelcome(m);
+    if(m.type==='auth')onAuth(m);
+    if(m.type==='vconfig'){if(!authed)onWelcome({});await setupDecoder(m);}   // servidor viejo: sin welcome, directo al video
     if(m.type==='still-clear'){stillSeq++;sc.hidden=true;}
     if(m.type==='pong')onPong(m);
     if(m.type==='app')onApp(m);
   };
 }
+function drop(w){
+  // Conexión perdida, cortada por silencio o por nosotros: reintentar con backoff, salvo que la página se esté cerrando.
+  if(w._dropped)return;w._dropped=true;
+  w.onclose=w.onmessage=w.onopen=w.onerror=null;try{w.close();}catch(e){}
+  clearInterval(pingTimer);clearInterval(statsTimer);authed=false;
+  if(closing)return;
+  msg.textContent='Sin conexión con la PC, reintentando…';pairBox.hidden=true;
+  clearTimeout(reconnectTimer);reconnectTimer=setTimeout(connectWS,backoff);backoff=Math.min(backoff*2,8000);
+}
+function onWelcome(m){
+  authed=true;backoff=500;pairBox.hidden=true;pairErr.textContent='';
+  if(m.token)store.set('token',m.token);
+  if(urlCode())history.replaceState(null,'',location.pathname+location.search);   // el código del QR ya se usó
+  msg.textContent='Esperando que la PC comparta pantalla…';
+  sendQuality();sendPenCfg();
+}
+function onAuth(m){
+  if(!m.error)store.set('token',null);          // el token guardado venció o la PC lo olvidó
+  pairBox.hidden=false;pairErr.textContent=m.error||'';msg.textContent='';
+  if(!m.error)codeIn.value='';codeIn.focus();
+}
+pairBox.addEventListener('submit',e=>{e.preventDefault();const c=codeIn.value.replace(/\D/g,'');
+  if(c.length===6)ctl({type:'pair',code:c,name:'Safari en iPad'});else pairErr.textContent='son 6 dígitos';});
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden){if(authed)ctl({type:'sleeping'});return;}
+  if(ws&&ws.readyState===1&&authed){ctl({type:'wake'});lastRx=performance.now();needKey();}
+  else{backoff=500;if(ws)drop(ws);else connectWS();}   // Safari mató el socket mientras dormía: reconectar ya
+});
+window.addEventListener('pagehide',()=>{if(authed)ctl({type:'sleeping'});});
+window.addEventListener('beforeunload',()=>{closing=true;ctl({type:'closing'});});
 
 // ---- Imagen fija sin pérdida (PNG) cuando la pantalla está quieta ----
 const sc=document.getElementById('s'), sctx=sc.getContext('2d');

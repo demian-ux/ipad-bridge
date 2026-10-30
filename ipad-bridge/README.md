@@ -9,12 +9,19 @@ quieta se ven los píxeles exactos de Windows. El Pencil y los toques vuelven a 
 ## Uso diario
 
 1. PC: `.\start.ps1` levanta el servidor (80/443) y el puente en modo `auto`: USB si el iPad está por cable
-   (requiere la app "Dispositivos Apple" y haber tocado Confiar en el iPad), si no Wi-Fi; cambia solo.
+   (requiere la app "Dispositivos Apple" y haber tocado Confiar en el iPad), si no red: la IP que se le pasó o la de
+   la app que pidió conexión desde el iPad (ver abajo). El cable manda: si se enchufa con la sesión por Wi-Fi, el
+   puente migra la sesión al USB sin cortar (un keyframe); si se desenchufa, la termina y vuelve por red si hay IP.
    Bitrate automático: 100 Mbps por USB, 50 si algún visor va por red.
-2. iPad: abrí https://192.168.1.15/ipad.html en Safari, o la app iPadBridge de Playgrounds. La captura arranca
-   sola al conectarse el primer visor y se detiene con el último. http://localhost/ muestra el estado, la calidad
-   actual y lo que mide el iPad. En la página, el HUD de arriba a la derecha muestra fps y latencias (ver "Medición")
-   y tocarlo cambia el preset de calidad: automático → mejor para dibujar → mejor para movimiento.
+2. iPad: abrí https://192.168.1.15/ipad.html en Safari, o la app iPadBridge de Playgrounds. La primera vez con cada
+   iPad el servidor pide el código de 6 dígitos que muestra http://localhost/ en la PC (o escaneá su QR con la
+   cámara: abre Safari con el código puesto); queda un token de 30 días en el iPad y no vuelve a preguntar. En la app
+   nativa la PC aparece sola en una lista (Bonjour); tocarla le pide a la PC que se conecte y, la primera vez, el
+   código. La captura arranca sola al conectarse el primer visor y se detiene con el último, o cuando el iPad se
+   bloquea o la app pasa al fondo (al volver pide un keyframe y sigue). http://localhost/ muestra el estado, el código
+   y QR de emparejamiento, los iPads emparejados, la calidad actual y lo que mide el iPad. En la página, el HUD de
+   arriba a la derecha muestra fps y latencias (ver "Medición") y tocarlo cambia el preset de calidad: automático →
+   mejor para dibujar → mejor para movimiento.
 3. Pencil = lápiz de Windows (Windows Ink) con presión, inclinación, hover y botón lateral; Photoshop, Krita, Clip
    Studio (en modo Windows Ink) etc. lo ven como una tableta. Doble toque del Pencil (solo en la app) = goma (tecla E,
    otro toque = B). Mientras el Pencil toca, una línea fina sigue a la punta hasta que el video la alcanza
@@ -47,7 +54,9 @@ quieta se ven los píxeles exactos de Windows. El Pencil y los toques vuelven a 
    (pide administrador una vez), genera los certificados para la IP de esa PC y ubica el monitor a la izquierda.
 3. `.\start.ps1` (agregá la IP del iPad si querés respaldo por red). Windows pregunta por el firewall la primera
    vez: permitir en redes privadas.
-4. En el iPad: `http://<IP de la PC>/` → instalar certificado y activar su confianza → app o página https.
+4. En el iPad: `http://<IP de la PC>/` → instalar certificado y activar su confianza → app o página https. Con el
+   certificado puesto, escanear el QR de http://localhost/ (en la PC) abre la página ya emparejada; si no, la página
+   pide el código que muestra esa misma pantalla.
    Por USB: conectar, tocar Confiar en el iPad y abrir la app Dispositivos Apple una vez.
 Si la IP de la PC cambia, `start.ps1` reemite el certificado del servidor solo; el iPad no necesita nada nuevo.
 
@@ -63,8 +72,11 @@ Si la IP de la PC cambia, `start.ps1` reemite el certificado del servidor solo; 
 - iPad: abrí http://192.168.1.15/ y seguí los pasos: instalar el certificado (perfil) y activar su confianza en
   Ajustes > General > Información > Ajustes de confianza de certificados. WebCodecs solo existe en https.
 - App nativa (opcional, para cable): desde esa misma página bajá iPadBridge.swiftpm.zip (el servidor lo regenera al
-  arrancar si cambiaron las fuentes), descomprimilo en Archivos y abrilo con Swift Playgrounds. Escucha TCP en 7777; `usb_bridge.py` la conecta al servidor por IP o por USB
-  (USB requiere la app "Dispositivos Apple" de Microsoft Store).
+  arrancar si cambiaron las fuentes), descomprimilo en Archivos y abrilo con Swift Playgrounds. Escucha TCP en 7777;
+  `usb_bridge.py` la conecta al servidor por IP o por USB (USB requiere la app "Dispositivos Apple" de Microsoft
+  Store). Por red la app lista las PCs que publican `_ipadbridge._tcp` por mDNS; tocar una le pide por http
+  (`/connect`) que su puente se conecte al iPad, con el código la primera vez (la app guarda el token por PC). Si no
+  hay Bonjour en esa red, se escribe la IP de la PC a mano.
 
 ## Pencil como tableta (lápiz virtual)
 
@@ -171,14 +183,20 @@ Pencil (presión 0.5) para probar la previsualización y el panel.
   filtro 1€ configurables en caliente (`Pen.configure`), teclas: `tap_keys` (pulsación de un atajo; agrega shift/AltGr
   si el carácter lo pide), `hold_key`/`release_keys` (modificador mantenido, para la barra de teclas), `type_text`
   (texto Unicode), y `foreground_app()` (ejecutable y título de la ventana activa, para la barra por aplicación).
-- `static/pc.html`: página de estado (http://localhost/): captura, visores, fps y Mbps.
+- `pairing.py`: código de emparejamiento de 6 dígitos (se renueva con cada acierto y tras 10 fallos), tokens de 30 días
+  guardados hasheados en `certs/pairing.json` (fuera de git) junto con el `id` estable de la PC. `discovery.py`:
+  publica `_ipadbridge._tcp` por mDNS con `zeroconf` (TXT: id, name, ip, http, https, ver).
+- `static/pc.html`: página de estado (http://localhost/): captura, visores, fps y Mbps, código y QR de emparejamiento
+  (solo se muestran a la propia PC), iPads emparejados.
 - `static/ipad.html`: decodificador WebCodecs + Pencil/toques, previsualización del trazo, gestos, barra por
   aplicación, panel de presión y teclado. `static/shortcuts.json`: perfiles de la barra y gestos.
   `static/setup.html`: guía del iPad.
-- `app/iPadBridge.swiftpm`: app nativa (AVSampleBufferDisplayLayer + Network): `Bridge.swift` protocolo, reloj y
-  perfiles; `VideoView.swift` video, Pencil, dedos y gestos; `StrokePreview.swift` previsualización; `Shortcuts.swift`
-  modelo de `shortcuts.json`; `Settings.swift` ajustes persistentes; `Panel.swift` panel ⚙; `Keyboard.swift` teclado;
-  `MyApp.swift` barra y pantalla. `usb_bridge.py`: su puente (reenvía `app`, manda `shortcuts` al conectar).
+- `app/iPadBridge.swiftpm`: app nativa (AVSampleBufferDisplayLayer + Network): `Bridge.swift` protocolo, reloj,
+  liveness y perfiles; `VideoView.swift` video, Pencil, dedos y gestos; `StrokePreview.swift` previsualización;
+  `Shortcuts.swift` modelo de `shortcuts.json`; `Settings.swift` ajustes persistentes; `Panel.swift` panel ⚙;
+  `Keyboard.swift` teclado; `Discovery.swift` lista las PCs por Bonjour; `MyApp.swift` barra y pantalla.
+  `usb_bridge.py`: su puente (USB por usbmux o red, migración en caliente, latido y reconexión; reenvía `app` y manda
+  `shortcuts` al conectar).
 - `tools/make_app_zip.py`: regenera `static/iPadBridge.swiftpm.zip` desde las fuentes de la app con rutas `/` (el
   `Compress-Archive` de PowerShell las escribe con `\` y Archivos del iPad no abre el paquete); `server.py` lo llama
   al arrancar si alguna fuente es más nueva que el zip. `--force` lo rehace siempre.
@@ -186,6 +204,21 @@ Pencil (presión 0.5) para probar la previsualización y el panel.
 - `tools/fake_app.py`: simula la app nativa en la PC para probar el puente sin iPad.
 - `tools/pen_probe.py`: ventana que muestra el lápiz (WM_POINTER), botones, rueda y teclas que llegan a Windows.
 
+Emparejamiento y sesión (todo aditivo salvo donde se indica): el visor manda en el `hello` `name` y, si los tiene,
+`token` (de otra vez) o `code` (los 6 dígitos de pc.html; la página lo toma de `#pair=` cuando viene del QR); después
+puede mandar `{"type":"pair","code"}`. El servidor contesta `{"type":"welcome","token","expires","id","name","ver"}` y
+recién entonces manda video y acepta input, o `{"type":"auth","need":"code","error"}` (error vacío = falta el código;
+tras 5 códigos malos cierra). Las conexiones desde la propia PC (usb_bridge.py, herramientas) entran sin código; un
+visor viejo sin token en otra máquina queda en `auth` y no recibe video: `PAIRING=0` vuelve al comportamiento
+anterior. Liveness: `ping` cada 2 s; un visor que ya mandó algún ping y lleva 5 s sin mandar nada se cierra (el visor
+corta por su lado a los 5 s sin bytes y reconecta con espera creciente 0,5 → 8 s). `{"type":"sleeping"}` (iPad
+bloqueado, página o app al fondo) saca al visor de la lista sin cerrar la conexión (sin visores se detiene la
+captura), `{"type":"wake"}` lo vuelve a sumar (el visor pide `need-key` a continuación), `{"type":"closing"}` cierra.
+`{"type":"transport","transport":"usb|net"}` lo manda usb_bridge.py al migrar la sesión de la app. El `ping` admite
+`tag`, que el `pong` devuelve (el puente separa sus pings de los de la app).
+HTTP: `GET /connect?code=…&name=…&port=7777` o `?token=…` desde el iPad (la app nativa, que encontró la PC por mDNS)
+pide que el puente se conecte a esa IP; responde el mismo JSON del `welcome` o 401 con `need:"code"`.
+`GET /bridge/target` (solo local) le da al puente la última IP que lo pidió (vale 60 s). `GET /qr.svg` (solo local).
 Protocolo visores: WebSocket, JSON `vconfig` (hvcC en base64, codec `hvc1.…`, `width`/`height` codificados: pueden
 ser menores que el monitor si la calidad adaptativa escaló), JSON `still-clear`, binario u8 0|1 (delta|key) + f64 ts +
 muestra, o u8 2 + PNG (imagen fija). `ts` es el reloj del servidor en ms de época (`now_ms()`: perf_counter anclado a
@@ -197,10 +230,13 @@ decodificación,"d":descartes desde el último ping,"rtt":último RTT}` cada 2 s
 "fps","mode","level"}`; el visor manda `{"type":"stats",fps,pfps,mbps,e2e50,e2e95,pres50,pres95,rtt,q,drops,transport,
 mode}` cada 5 s (va al log del servidor y a pc.html), `{"type":"quality","mode":"auto|draw|motion"}` para el preset y
 `{"type":"need-key"}` para pedir un IDR. Cada `input` lleva `t` = reloj del servidor estimado por el visor.
-Protocolo app nativa: TCP, u32 largo + u8 tipo + payload (0 ping, 1 video, 2 config = u8 códec 1 avcC/2 hvcC + record,
-3 imagen fija PNG, 4 still-clear, 16 input JSON, 17 need-key, 18 JSON de control iPad→PC: ping/stats/quality tal cual,
-19 JSON de control PC→iPad: pong y app tal cual, más `{"type":"shortcuts",gestures,profiles}` que arma el puente con
-`static/shortcuts.json` al conectar; una app vieja ignora los tipos que no conoce).
+Protocolo app nativa: TCP, u32 largo + u8 tipo + payload (0 latido PC→iPad cada 2 s, la app lo devuelve tal cual; 1 video,
+2 config = u8 códec 1 avcC/2 hvcC + record, 3 imagen fija PNG, 4 still-clear, 16 input JSON, 17 need-key, 18 JSON de
+control iPad→PC: ping/stats/quality/sleeping/wake/closing tal cual, 19 JSON de control PC→iPad: pong/welcome/auth/
+transport/app tal cual, más `{"type":"shortcuts",gestures,profiles}` que arma el puente con `static/shortcuts.json` al
+conectar; una app vieja ignora los tipos que no conoce). El puente corta la sesión a los 5 s sin bytes solo si la app
+alguna vez devolvió el latido (la app vieja no lo devuelve y sigue funcionando); la app corta a los 5 s sin bytes de la
+PC. Tras migrar de red a USB el puente repite el config y los `shortcuts` en la conexión nueva y pide keyframe.
 Input JSON (igual por WebSocket, con `"type":"input"`): dedos `{"ev":"move|down|up|scroll","x","y","btn","dy","dx"}`
 (`btn` 0 izquierdo, 1 medio, 2 derecho; `down`/`up` sin `x`,`y` = en la posición actual del cursor);
 Pencil con `"pen":1`: `{"ev":"hover|down|up","x","y","p":0..1,"tx","ty":grados,"btn":2 = botón lateral}`,
@@ -286,6 +322,33 @@ diagnosticar Wi-Fi sin estar al lado del iPad.
   pipeline directo, a costa de ~0,9 GB/s de PCIe y un hilo; por eso solo se usa cuando un visor por red sufre o con el
   preset de movimiento bajo carga.
 
+## Conexión: emparejamiento, descubrimiento y robustez
+
+- `PAIRING` (1): exigir código/token a los visores que no vienen de esta PC. `PAIRING_LOCAL` (1): con 0 también se lo
+  exige a los locales (solo para probar el flujo con `tools/stream_probe.py --code=…`). `LIVENESS` (5): segundos sin
+  mensajes antes de cerrar un visor. Los tokens se revocan borrando `certs/pairing.json` (también cambia el `id` de la
+  PC; los iPads vuelven a pedir código). El código cambia con cada acierto y tras 10 fallos seguidos, y cada fallo
+  espera 1 s: no se puede probar el millón de combinaciones.
+- El QR lleva `http://<IP>/#pair=<código>`: la guía de instalación, si https ya responde (certificado instalado), salta
+  sola a `https://<IP>/ipad.html#pair=…`; si no, muestra los pasos y el enlace del paso 4 conserva el código. El
+  fragmento no viaja al servidor, así que el código no queda en ningún log.
+- mDNS: `discovery.py` publica `_ipadbridge._tcp` (nombre = nombre de la PC) con `zeroconf`; si falta el paquete el
+  servidor avisa y sigue sin publicar (pc.html lo dice). Safari no puede usar mDNS: para la página queda el QR.
+- Puente (`usb_bridge.py auto ws://localhost/ws [IP]`): USB si hay iPad por usbmux; si no, la IP que pidió la app por
+  `/connect`; si no, la IP de la línea de comandos. Por red vigila usbmux cada 2 s y migra al cable sin cortar la
+  sesión con el servidor (el servidor pasa a 100 Mbps y reinicia el encoder: un keyframe de corte). Si el cable se va,
+  la sesión termina y se vuelve a conectar: USB si volvió, si no red (espera 2 → 10 s entre intentos).
+- Pruebas en la PC sin iPad (servidor en puertos alternativos: `python server.py 8081 8444`):
+  `python tools/stream_probe.py ws://127.0.0.1:8081/ws 10 --silent=3` (el servidor lo cierra a los ~5 s de silencio),
+  `--sleep=5` (sleeping a los 5 s: la captura se detiene; wake + need-key a los 10: keyframe en ~1 s),
+  `PAIRING_LOCAL=0` + `--code=…` / `--token=…` (flujo de emparejamiento; 6 códigos malos cierran);
+  `curl "http://127.0.0.1:8081/connect?code=…&name=x&port=7779"` y `python tools/fake_app.py 20 7779` con
+  `python usb_bridge.py auto ws://127.0.0.1:8081/ws` (el puente va a la app que lo pidió);
+  `IPADBRIDGE_FAKE_USB=7778 python usb_bridge.py auto ws://127.0.0.1:8081/ws 127.0.0.1` con `fake_app.py 40 7777`
+  (red) y después `fake_app.py 12 7778` (el "cable": migración a USB y, cuando termina, vuelta a red);
+  `fake_app.py 20 7777 --mute` (app vieja sin latido: no se la corta). Medido el 30 de octubre de 2026: todo lo
+  anterior pasa; la migración tarda < 2 s desde que aparece el "cable" y el servidor cambia 50 → 100 Mbps.
+
 ## Por qué puertos 80 y 443
 
 Safari en iPadOS convierte solo las direcciones http en https. Con puertos no estándar esa conversión cae en el
@@ -306,7 +369,11 @@ puerto sin TLS y falla incluso la página http. Con 80/443 aterriza en el 443, d
 - Teclado: el campo oculto recibe lo que el iPad decide mandar; la autocorrección está apagada pero algunos atajos
   del sistema (Cmd+H, Cmd+Tab) no llegan a Safari ni a la app. En la app, Option+letra manda el atajo `alt+letra` y
   descarta el carácter alternativo que iOS inserta (ventana de 50 ms).
-- La app tiene que estar en primer plano en el iPad; iOS la suspende en segundo plano.
+- La app tiene que estar en primer plano en el iPad; iOS la suspende en segundo plano (avisa `sleeping` al irse y
+  `wake` + keyframe al volver; si iOS mató el TCP, el puente reconecta solo por USB y la app vuelve a pedir
+  `/connect` por red).
+- Seguridad: el emparejamiento protege la página (wss + token) y el pedido `/connect`; el video a la app nativa va
+  por TCP sin cifrar (por USB no importa; por Wi-Fi es la red local). El puente entra sin código porque corre en la PC.
 - Keyframes: con intra-refresh no hay IDR periódicos; un visor nuevo pide uno y el encoder se reinicia (~0,3 s
   hasta la imagen), lo que congela ese instante a los demás visores. `KEYFRAMES=idr` si se prefiere el keyframe por
   segundo (sin reinicios, pero con el pulso de bitrate y hasta 1 s de espera).

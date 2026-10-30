@@ -11,6 +11,13 @@ Mensajes a los visores:
 Del visor: {"type":"ping","t":reloj del visor}, {"type":"stats",...} cada 5 s, {"type":"quality","mode":"auto|draw|motion"},
 {"type":"need-key"} (pide un IDR: reinicia el encoder), {"type":"input", ..., "t": reloj del servidor estimado}.
   JSON   {"type":"app", exe, title}                  -> ventana activa de Windows (barra de atajos por aplicación)
+Emparejamiento (pairing.py): el visor manda en el hello `token` (guardado de otra vez) o `code` (los 6 dígitos que muestra
+pc.html), o después {"type":"pair","code"}; el servidor contesta {"type":"welcome", token, expires, id, name} y recién
+entonces manda video y acepta input, o {"type":"auth","need":"code"[,"error"]}. Las conexiones desde esta misma PC
+(usb_bridge.py, herramientas) no necesitan código. Liveness: 5 s sin mensajes de un visor que ya mandó algún ping lo
+cierran; {"type":"sleeping"} (iPad bloqueado o app al fondo) lo saca de la lista sin cerrar (sin visores se detiene la
+captura), {"type":"wake"} lo vuelve a sumar, {"type":"closing"} cierra. {"type":"transport","transport":"usb|net"} lo
+manda usb_bridge.py cuando migra la sesión de la app al cable o a la red (cambia el bitrate).
 """
 import asyncio
 import base64
@@ -30,11 +37,14 @@ from pathlib import Path
 
 from aiohttp import web, WSMsgType
 
+import discovery
 import hevc
+from pairing import Pairing
 from winput import Mouse, Pen, foreground_app, hold_key, release_keys, tap_keys, target_display, tilt_from_angles, type_text
 
 STATIC = Path(__file__).parent / "static"
-CERTS = Path(__file__).parent / "certs"
+# Carpeta de datos (certificados, pairing.json): la del proyecto, o IPADBRIDGE_CERTS cuando se instala en Program Files
+CERTS = Path(os.environ.get("IPADBRIDGE_CERTS") or Path(__file__).parent / "certs")
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 80
 TLS_PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 443
 FFMPEG = os.environ.get("FFMPEG", "ffmpeg")
@@ -63,6 +73,12 @@ GOP_S = float(os.environ.get("GOP_S", "10" if KEYFRAMES == "refresh" else "1"))
 # y vuelve a subir al estabilizarse; "0" la desactiva (queda el preset manual del iPad y el bitrate por transporte).
 ADAPTIVE = os.environ.get("ADAPTIVE", "1") != "0"
 NVENC_DELAY = os.environ.get("NVENC_DELAY", "0")   # frames que NVENC puede retener antes de entregar ("" = valor de ffmpeg)
+# Emparejamiento (ítem 1.3). PAIRING=0 acepta a cualquier visor sin código (como antes; para visores viejos en otra
+# máquina). PAIRING_LOCAL=0 exige código también a las conexiones desde esta misma PC (solo para probar el flujo).
+PAIRING = os.environ.get("PAIRING", "1") != "0"
+PAIRING_LOCAL = os.environ.get("PAIRING_LOCAL", "1") != "0"
+LIVENESS = float(os.environ.get("LIVENESS", "5"))   # s sin mensajes de un visor (manda ping cada 2 s) antes de cerrarlo
+TARGET_TTL = 60.0   # s que vale el pedido de conexión de la app nativa (/connect) para el puente
 
 # Reloj del servidor para medir latencias (ms de época): perf_counter (QPC, sub-ms) anclado a time.time(), que en
 # Windows tiene resolución de 15,6 ms. Los frames llevan este reloj en `ts` y el visor lo sincroniza con ping/pong.
@@ -80,6 +96,9 @@ def pct(samples, p):
 
 
 state = {"ipads": set(), "status": set()}
+pairing = Pairing(CERTS / "pairing.json")   # código de emparejamiento, tokens (hasheados) e id estable de la PC
+advertiser = None                           # publicación mDNS (se crea en main)
+bridge_target = {}                          # {"ip","port","at","name"}: la app nativa pidió por /connect que el puente la llame
 input_lat = deque(maxlen=300)   # latencia de input en ms: reloj del servidor al inyectar - "t" que estampó el visor
 mouse = Mouse()
 pen = Pen(mouse)
@@ -689,52 +708,168 @@ async def app_loop():
             log.exception("app_loop: error (sigo)")
 
 
+# ---------------------------------------------------------------- emparejamiento y sesión de los visores (ítems 1.3 y 1.5)
+
+def is_local(request):
+    """Conexión desde esta misma PC (pc.html, usb_bridge.py, herramientas)."""
+    return (request.remote or "") in ("127.0.0.1", "::1", "localhost")
+
+
+def pair_url():
+    """Lo que lleva el QR: la guía http con el código en el fragmento. setup.html salta a https://…/ipad.html#pair=… si
+    el certificado ya está instalado (el fragmento no viaja al servidor, así que el código no queda en ningún log)."""
+    return http_url("/") + "#pair=" + pairing.code
+
+
+def status_info(local):
+    """Mensaje `info` para los visores de estado. El código, el QR y la lista de emparejados solo salen hacia esta PC."""
+    info = {"type": "info", "ipad_url": https_url("/ipad.html"), "setup_url": http_url("/"), "target": target_info(),
+            "id": pairing.pc_id, "name": discovery.pc_name(), "paired": len(pairing.paired()), "pairing": PAIRING,
+            "mdns": advertiser is not None and advertiser.zc is not None}
+    if local:
+        info.update(code=pairing.code, qr_url="/qr.svg", pair_url=pair_url(), devices=pairing.paired())
+    return info
+
+
+async def notify_info():
+    for w in list(state["status"]):
+        try:
+            await send(w, status_info(getattr(w, "_local", False)))
+        except (ConnectionResetError, RuntimeError):
+            state["status"].discard(w)
+
+
+async def activate(ws, request):
+    """Visor autorizado (o que despierta): entra a la lista, arranca la captura y recibe config, imagen fija y perfil."""
+    if ws in state["ipads"]:
+        return
+    state["ipads"].add(ws)
+    log.info("ipad activo desde %s por %s (visores: %d)", request.remote, ws._transport, len(state["ipads"]))
+    await capture.restart_if_needed()
+    await capture.start()
+    if capture.config_msg:
+        await send(ws, capture.config_msg)
+    if stills.current_png is not None:
+        await ws.send_bytes(b"\x02" + stills.current_png)
+    try:                      # perfil de la barra: la ventana activa ahora mismo
+        exe, title = foreground_app()
+        if exe:
+            app_state.update(exe=exe, title=title)
+    except OSError:
+        pass
+    if app_state["exe"]:
+        await send(ws, app_msg())
+
+
+async def deactivate(ws, why):
+    """El visor se durmió o se fue: soltar mouse, lápiz y modificadores; sin visores, detener la captura."""
+    if ws not in state["ipads"]:
+        return
+    state["ipads"].discard(ws)
+    mouse.release_all()
+    pen.release_all()
+    release_keys()      # modificadores de la barra lateral que quedaron mantenidos
+    if not state["ipads"]:
+        await capture.stop()
+        await stills.stop()
+        log.info("sin visores (%s): captura detenida", why)
+
+
+def check_pairing(remote, m, tries):
+    """Decide si un visor entra. Devuelve ("ok", token, expires) con el token a devolverle (None si no hace falta),
+    ("code", error) si le falta el código, o ("closed", error) si agotó los intentos.
+    Orden: token vigente; conexión local (usb_bridge: el cable o la IP que escribió el dueño son la autorización);
+    PAIRING=0; código correcto (emite token y renueva el código)."""
+    entry = pairing.check_token(m.get("token"))
+    if entry is not None:
+        return "ok", m.get("token"), entry["expires"]
+    if not PAIRING or (PAIRING_LOCAL and remote in ("127.0.0.1", "::1", "localhost")):
+        return "ok", None, None
+    if m.get("code") is None:
+        return "code", ""
+    if tries > 5:
+        return "closed", "demasiados intentos"
+    if pairing.check_code(str(m.get("code"))):
+        name = str(m.get("name") or remote or "")[:64]
+        token, expires = pairing.issue(name)
+        log.info("emparejado: %s desde %s (código renovado)", name, remote)
+        return "ok", token, expires
+    return "code", "código incorrecto"
+
+
+async def authorize(ws, request, m):
+    """`hello` o `pair` de un visor ipad -> `welcome` y a trabajar, o `auth` con need:"code"."""
+    ws._tries += 1 if m.get("code") is not None else 0
+    verdict, *rest = check_pairing(request.remote, m, ws._tries)
+    if verdict == "ok":
+        token, expires = rest
+        ws._authed = True
+        await send(ws, {"type": "welcome", "token": token, "expires": expires, "id": pairing.pc_id,
+                        "name": discovery.pc_name(), "ver": discovery.PROTO_VER})
+        if token is not None and m.get("code") is not None:
+            await notify_info()      # el código cambió: pc.html muestra el nuevo
+        await activate(ws, request)
+        return
+    error = rest[0]
+    if error:
+        await asyncio.sleep(1)       # un fallo por segundo como mucho
+    await send(ws, {"type": "auth", "need": "code", "error": error})
+    if verdict == "closed":
+        await ws.close()
+
+
 async def ws_handler(request):
     ws = web.WebSocketResponse(heartbeat=10, max_msg_size=64 * 1024 * 1024)
     await ws.prepare(request)
     role = None
+    ws._transport = "net"      # la app por usb_bridge dice "usb" o "net"; Safari no dice nada = red
+    ws._authed = False         # True con token o código válidos, desde esta misma PC o con PAIRING=0
+    ws._last_rx = time.monotonic()
+    ws._pings = 0              # liveness solo para visores que mandan ping (un visor viejo que no manda no se corta)
+    ws._tries = 0
     try:
         async for msg in ws:
             if msg.type != WSMsgType.TEXT:
                 continue
+            ws._last_rx = time.monotonic()
             m = json.loads(msg.data)
             t = m.get("type")
             if t == "hello":
+                if role is not None:
+                    continue
                 role = "ipad" if m.get("role") == "ipad" else "status"
-                ws._transport = m.get("transport", "net")  # la app por usb_bridge dice "usb" o "net"; Safari no dice nada = red
+                ws._transport = "usb" if m.get("transport") == "usb" else "net"
                 ws._rtt, ws._q, ws._drops, ws._stats = deque(maxlen=30), 0, 0, None   # medición (ping/stats del visor)
-                state["ipads" if role == "ipad" else "status"].add(ws)
-                log.info("%s conectado desde %s por %s (visores: %d)", role, request.remote, ws._transport, len(state["ipads"]))
+                log.info("%s conectado desde %s por %s", role, request.remote, ws._transport)
                 if role == "ipad":
-                    await capture.restart_if_needed()
-                    await capture.start()
-                    if capture.config_msg:
-                        await send(ws, capture.config_msg)
-                    if stills.current_png is not None:
-                        await ws.send_bytes(b"\x02" + stills.current_png)
-                    try:                      # perfil de la barra: la ventana activa ahora mismo
-                        exe, title = foreground_app()
-                        if exe:
-                            app_state.update(exe=exe, title=title)
-                    except OSError:
-                        pass
-                    if app_state["exe"]:
-                        await send(ws, app_msg())
+                    await authorize(ws, request, m)
                 else:
-                    await send(ws, {"type": "info", "ipad_url": https_url("/ipad.html"), "setup_url": http_url("/"),
-                                    "target": target_info()})
+                    ws._local = is_local(request)
+                    state["status"].add(ws)
+                    await send(ws, status_info(ws._local))
+            elif t == "pair" and role == "ipad" and not ws._authed:
+                await authorize(ws, request, m)
+            elif t == "ping" and role:
+                # Sincronización de reloj estilo NTP: devolvemos su t y nuestro reloj; el visor calcula RTT y offset.
+                # De paso trae cola del decodificador (q), descartes desde el último ping (d) y su último RTT.
+                # Se contesta también sin emparejar (el visor mide y detecta que la PC sigue ahí mientras pide el código).
+                ws._pings += 1
+                ws._q, ws._drops = int(m.get("q", 0)), int(m.get("d", 0))
+                if m.get("rtt") is not None:
+                    ws._rtt.append(float(m["rtt"]))
+                pong = {"type": "pong", "t": m.get("t"), "mt": now_ms(), "inp50": pct(input_lat, 50), "inp95": pct(input_lat, 95),
+                        "br": capture.bitrate, "scale": capture.scale, "fps": capture.fps, "mode": quality.mode, "level": quality.level}
+                if "tag" in m:
+                    pong["tag"] = m["tag"]   # usb_bridge distingue sus pings de los de la app
+                await send(ws, pong)
+            elif t == "closing":
+                break
+            elif role != "ipad" or not ws._authed:
+                continue        # sin emparejar: ni input ni control
             elif t == "input":
                 handle_input(m)
                 if "t" in m:   # el visor estampa el evento con el reloj del servidor estimado: latencia hasta inyectar
                     input_lat.append(now_ms() - float(m["t"]))
-            elif t == "ping" and role:
-                # Sincronización de reloj estilo NTP: devolvemos su t y nuestro reloj; el visor calcula RTT y offset.
-                # De paso trae cola del decodificador (q), descartes desde el último ping (d) y su último RTT.
-                ws._q, ws._drops = int(m.get("q", 0)), int(m.get("d", 0))
-                if m.get("rtt") is not None:
-                    ws._rtt.append(float(m["rtt"]))
-                await send(ws, {"type": "pong", "t": m.get("t"), "mt": now_ms(), "inp50": pct(input_lat, 50), "inp95": pct(input_lat, 95),
-                                "br": capture.bitrate, "scale": capture.scale, "fps": capture.fps, "mode": quality.mode, "level": quality.level})
             elif t == "stats":
                 ws._stats = dict(m, _at=now_ms(), transport=m.get("transport", ws._transport), remote=request.remote)
                 log.info("stats %s: %s", request.remote, " ".join(f"{k}={v}" for k, v in m.items() if k != "type"))
@@ -747,19 +882,37 @@ async def ws_handler(request):
             elif t == "need-key":
                 # Con KEYFRAMES=idr el visor espera al próximo IDR (uno por segundo); con intra-refresh se reinicia el encoder.
                 await capture.request_key()
+            elif t == "transport":
+                # usb_bridge migró la sesión de la app (red -> cable o al revés): el bitrate depende del transporte
+                ws._transport = "usb" if m.get("transport") == "usb" else "net"
+                log.info("visor %s ahora por %s", request.remote, ws._transport)
+                await capture.restart_if_needed()
+            elif t == "sleeping":
+                await deactivate(ws, "iPad bloqueado o app al fondo")
+            elif t == "wake":
+                await activate(ws, request)
     finally:
-        if role:
-            state["ipads" if role == "ipad" else "status"].discard(ws)
+        if role == "status":
+            state["status"].discard(ws)
         if role == "ipad":
-            mouse.release_all()
-            pen.release_all()
-            release_keys()      # modificadores de la barra lateral que quedaron mantenidos
-            if not state["ipads"]:
-                await capture.stop()
-                await stills.stop()
-                log.info("sin visores: captura detenida")
-        log.info("%s desconectado", role)
+            await deactivate(ws, "visor desconectado")
+        log.info("%s desconectado (%s)", role, request.remote)
     return ws
+
+
+async def liveness_loop():
+    """Cada segundo: cierra los visores activos que llevan más de LIVENESS s sin mandar nada (mandan ping cada 2 s).
+    Solo a los que alguna vez mandaron ping: un visor viejo que no mide sigue como antes."""
+    while True:
+        await asyncio.sleep(1)
+        now = time.monotonic()
+        for w in list(state["ipads"]):
+            if w._pings and now - w._last_rx > LIVENESS and not w.closed:
+                log.warning("visor sin señales de vida hace %.0f s: cerrando", now - w._last_rx)
+                try:
+                    await w.close()
+                except Exception:
+                    log.exception("liveness: error al cerrar (sigo)")
 
 
 async def status_loop():
@@ -781,7 +934,11 @@ async def status_loop():
                 await capture.restart_if_needed()  # cambió el refresco del monitor, el transporte de un visor o la calidad
                 if capture.proc is not None and capture.output_idx is not None:
                     await stills.start(capture.output_idx)
+            if advertiser is not None:
+                await advertiser.update(local_ip())   # cambió la IP de la PC: volver a publicar por mDNS
             st = {"type": "status", "viewers": len(state["ipads"]), "capturing": capture.proc is not None,
+                  "paired": len(pairing.paired()),
+                  "bridge_target": bridge_target.get("ip") if bridge_target and time.time() - bridge_target.get("at", 0) < TARGET_TTL else None,
                   "fps": round(fps), "mbps": round(mbps, 1), "target": target_info(), "bitrate": capture.bitrate,
                   "still": stills.current_png is not None, "stills_sent": stills.sent,
                   "transports": sorted({getattr(w, "_transport", "net") for w in state["ipads"]}),
@@ -819,10 +976,61 @@ async def ping(request):
                              headers={"Access-Control-Allow-Origin": "*"})
 
 
+async def qr_svg(request):
+    """QR de emparejamiento (solo para esta PC): la guía http con el código vigente en el fragmento."""
+    if not is_local(request):
+        raise web.HTTPForbidden(text="El QR solo se muestra en la PC (http://localhost/).")
+    try:
+        import qrcode
+        import qrcode.image.svg
+    except ImportError:
+        raise web.HTTPNotFound(text="falta el paquete qrcode (pip install qrcode)")
+    img = qrcode.make(pair_url(), image_factory=qrcode.image.svg.SvgPathImage, box_size=10, border=2)
+    buf = io.BytesIO()
+    img.save(buf)
+    return web.Response(body=buf.getvalue(), content_type="image/svg+xml", headers={"Cache-Control": "no-store"})
+
+
+async def connect_request(request):
+    """La app nativa (que encontró esta PC por Bonjour) pide que el puente se conecte a ella por red:
+    GET /connect?token=…  o  ?code=123456&name=iPad[&port=7777]. El servidor es el que llama al iPad (la app escucha en
+    7777), así que este pedido es el "emparejar" de la app: con el código correcto devuelve un token que la app guarda.
+    Responde {"ok":true,"token","expires","id","name"} o 401 {"need":"code","error"}; usb_bridge.py lo lee en /bridge/target."""
+    q = request.query
+    m = {"token": q.get("token"), "code": q.get("code"), "name": q.get("name")}
+    verdict, *rest = check_pairing(request.remote, m, 1)
+    if verdict != "ok":
+        await asyncio.sleep(1 if rest[0] else 0)
+        return web.json_response({"ok": False, "need": "code", "error": rest[0]}, status=401)
+    token, expires = rest
+    try:
+        port = int(q.get("port", "7777"))
+    except ValueError:
+        port = 7777
+    bridge_target.update(ip=request.remote, port=port, at=time.time(), name=str(m["name"] or "")[:64])
+    log.info("la app en %s:%d pide conexión por red (%s)", request.remote, port, m["name"] or "sin nombre")
+    if token is not None and m["code"] is not None:
+        await notify_info()
+    return web.json_response({"ok": True, "token": token, "expires": expires, "id": pairing.pc_id, "name": discovery.pc_name(),
+                              "ver": discovery.PROTO_VER})
+
+
+async def bridge_target_get(request):
+    """usb_bridge.py (en esta PC) pregunta a qué IP conectarse por red: la última app que pidió /connect, si no venció."""
+    if not is_local(request):
+        raise web.HTTPForbidden()
+    if bridge_target and time.time() - bridge_target.get("at", 0) < TARGET_TTL:
+        return web.json_response(dict(bridge_target, age=round(time.time() - bridge_target["at"], 1)))
+    return web.json_response({})
+
+
 app = web.Application()
 app.router.add_get("/", index)
 app.router.add_get("/ca.crt", ca_cert)
 app.router.add_get("/ping", ping)
+app.router.add_get("/qr.svg", qr_svg)
+app.router.add_get("/connect", connect_request)
+app.router.add_get("/bridge/target", bridge_target_get)
 app.router.add_get("/ws", ws_handler)
 app.router.add_static("/", STATIC, show_index=False)
 
@@ -853,9 +1061,14 @@ async def main():
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         tls.load_cert_chain(CERTS / "server.crt", CERTS / "server.key")
         await web.TCPSite(runner, "0.0.0.0", TLS_PORT, ssl_context=tls).start()
+    global advertiser
+    advertiser = discovery.Advertiser(pairing.pc_id, local_ip(), PORT, TLS_PORT)
+    await advertiser.start()
     t = target_info()
     print("=" * 60)
     print(f"  Estado (PC):      {http_url('/', 'localhost')}")
+    print(f"  Emparejamiento:   {'código ' + pairing.code + ' (QR en la página de estado)' if PAIRING else 'desactivado (PAIRING=0)'}; "
+          f"{len(pairing.paired())} iPad(s) ya emparejados; mDNS {'publicado' if advertiser.zc else 'no disponible'}")
     print(f"  iPad (1ª vez):    {http_url('/')}   <- instalar certificado")
     print(f"  iPad (pantalla):  {https_url('/ipad.html') if tls else http_url('/ipad.html')}")
     print(f"  Monitor objetivo: {t['name']} {t['width']}x{t['height']} @ {t['hz']} Hz ({'virtual' if t['virtual'] else 'SIN monitor virtual: espejo'})")
@@ -865,11 +1078,15 @@ async def main():
         """Si un bucle de fondo termina igual, que quede en el log con su traceback (y no solo al recolectar la tarea)."""
         if not task.cancelled() and task.exception() is not None:
             log.error("tarea %s terminó con error", task.get_name(), exc_info=task.exception())
-    app["bg"] = [asyncio.create_task(status_loop(), name="status_loop"), asyncio.create_task(app_loop(), name="app_loop")]
-    for task in app["bg"]:
+    bg_tasks = [asyncio.create_task(status_loop(), name="status_loop"), asyncio.create_task(app_loop(), name="app_loop"),
+                asyncio.create_task(liveness_loop(), name="liveness_loop")]
+    for task in bg_tasks:
         task.add_done_callback(_watch)
-    while True:
-        await asyncio.sleep(3600)
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    finally:
+        await advertiser.stop()
 
 
 if __name__ == "__main__":

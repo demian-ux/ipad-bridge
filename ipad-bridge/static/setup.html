@@ -8,6 +8,8 @@
  .note{color:#aaa;font-size:15px}
 </style></head><body>
 <h2>iPad Bridge · primera vez en este iPad</h2>
+<p id="pairnote" class="note" hidden>Este enlace trae el código de emparejamiento del QR: cuando termines los pasos, la página de la pantalla
+se empareja sola.</p>
 <p>El modo de baja latencia necesita https. Instalá una sola vez el certificado de la PC:</p>
 <ol>
   <li><a class="btn" href="/ca.crt">Descargar certificado</a><br><span class="note">Safari pregunta "¿Permitir descargar perfil?" → Permitir.</span></li>
@@ -17,6 +19,15 @@
 </ol>
 <p><button class="btn" style="border:0;font:inherit" onclick="testTLS()">Probar https</button> <span id="tls" class="note"></span></p>
 <script>
+// El QR de la PC trae el código de emparejamiento en el fragmento (#pair=123456), que nunca viaja al servidor.
+// Si el certificado ya está instalado (https responde), saltar directo a la pantalla con el código; si no, los pasos
+// de siempre y el enlace del paso 4 lleva el código.
+const pairCode=(/pair=(\d{6})/.exec(location.hash)||[])[1];
+if(pairCode){
+  document.getElementById('pairnote').hidden=false;
+  for(const a of document.querySelectorAll('a[href$="/ipad.html"]'))a.href+='#pair='+pairCode;
+  fetch('{{HTTPS}}/ping',{cache:'no-store'}).then(r=>r.json()).then(()=>{location.replace('{{HTTPS}}/ipad.html#pair='+pairCode);}).catch(()=>{});
+}
 async function testTLS(){const el=document.getElementById('tls');el.textContent='probando…';const t0=performance.now();
   try{const r=await fetch('{{HTTPS}}/ping',{cache:'no-store'});const j=await r.json();
     el.textContent='OK: https responde ('+Math.round(performance.now()-t0)+' ms). Abrí el botón del paso 4.';el.style.color='#6f6';}
