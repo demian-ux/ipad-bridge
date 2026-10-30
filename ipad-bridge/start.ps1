@@ -6,5 +6,6 @@ Set-Location $PSScriptRoot
 python tools\make_certs.py | Out-Null          # reemite el certificado si cambió la IP de la PC
 $bridgeArgs = @('-u', 'usb_bridge.py', 'auto', 'ws://localhost/ws')
 if ($IpadIp) { $bridgeArgs += $IpadIp }
-Start-Process python -ArgumentList $bridgeArgs -WindowStyle Hidden
+# El puente corre oculto: su salida queda en bridge.log / bridge.err. El servidor escribe en consola y en server.log.
+Start-Process python -ArgumentList $bridgeArgs -WindowStyle Hidden -RedirectStandardOutput bridge.log -RedirectStandardError bridge.err
 python server.py 80 443

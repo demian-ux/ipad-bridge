@@ -47,6 +47,12 @@ MAX_FPS = int(os.environ.get("MAX_FPS", "60"))
 # Doble toque del Pencil: alterna entre dos atajos en la ventana activa (Photoshop: E = borrador, B = pincel).
 # Windows no permite emular el lado goma de un lápiz sintético, por eso va por teclado. Formato "tecla_goma,tecla_vuelta".
 PEN_TAP_KEYS = os.environ.get("PEN_TAP_KEYS", "e,b").split(",")
+# iPad sin hover: el Pencil "aparece" ya tocando. Un lápiz real entra en alcance antes del contacto, y Photoshop con
+# Windows Ink perdía el primer trazo cuando ENTER y DOWN llegaban en el mismo instante. PEN_ARM_MS: ms entre entrar
+# en alcance y tocar (los eventos de ese lapso se encolan). PEN_LEAVE_S: segundos quieto tras soltar antes de salir de
+# alcance (mientras está en alcance, los trazos siguientes no vuelven a pasar por ENTER).
+PEN_ARM_MS = int(os.environ.get("PEN_ARM_MS", "30"))
+PEN_LEAVE_S = float(os.environ.get("PEN_LEAVE_S", "1.5"))
 # Keyframes. "refresh" (predeterminado): GOP de GOP_S segundos con intra-refresh de NVENC (columnas intra repartidas
 # entre los frames: sin pulso de bitrate ni de calidad cada segundo; medido a 3840x2160: reposo 5,1 -> 0,2 Mbps). Un
 # visor nuevo pide need-key y el encoder se reinicia para emitir un IDR (~0,3 s). "idr": comportamiento anterior, un
@@ -162,7 +168,7 @@ class Quality:
             return f"descartes {drops}"
         if getattr(w, "_transport", "net") == "usb":
             return ""
-        rtts = getattr(w, "_rtt", ())
+        rtts = list(getattr(w, "_rtt", ()))   # deque: no admite rebanadas (esto mataba el bucle de estado a los 8 s)
         if len(rtts) >= 4 and min(rtts[-2:]) > min(rtts) + 40:
             return f"rtt {rtts[-1]:.0f} ms (base {min(rtts):.0f})"
         st = getattr(w, "_stats", None)
@@ -284,7 +290,9 @@ class Capture:
         now = time.monotonic()
         # Encoder recién arrancado (su IDR inicial viene en camino) o IDR reciente: no reiniciar de nuevo. También frena
         # a un visor que pide keyframes en cadena (p. ej. una pestaña en segundo plano que no da abasto).
-        if now - self.started_at < 1.5 or now - self.last_key_at < 1.0 or self.restarting:
+        # Mínimo 2,5 s entre IDR: cada reinicio congela ~0,3 s y manda un IDR grande que por Wi-Fi llena la cola del
+        # decodificador, lo que hacía que el visor pidiera otro keyframe enseguida (medido: 30 reinicios en 2 minutos).
+        if now - self.started_at < 1.5 or now - self.last_key_at < 2.5 or self.restarting:
             return
         log.info("need-key: reinicio del encoder para emitir un IDR")
         await self.restart()
@@ -530,9 +538,25 @@ def _tilt(m):
     return 0, 0
 
 
+_pen_deferred = []      # eventos del Pencil en espera mientras el lápiz entra en alcance (PEN_ARM_MS)
+_pen_arming = False
+
+
+def _pen_flush():
+    global _pen_arming
+    _pen_arming = False
+    queued, _pen_deferred[:] = list(_pen_deferred), []
+    for q in queued:
+        handle_pen(q)
+
+
 def handle_pen(m):
     """Eventos del Pencil ("pen":1) -> lápiz virtual con presión. Si no hay lápiz (Windows viejo), mouse izquierdo."""
+    global _pen_arming
     ev = m.get("ev")
+    if _pen_arming and ev != "pencfg":
+        _pen_deferred.append(m)
+        return
     if not pen.available:
         m.pop("pen", None)
         if ev == "moves":
@@ -558,13 +582,21 @@ def handle_pen(m):
     elif ev == "hover":
         pen.hover(m["x"], m["y"], *_tilt(m))
     elif ev == "down":
+        if not pen.inrange and PEN_ARM_MS > 0:
+            # Entrar en alcance ahora y tocar PEN_ARM_MS después, como un lápiz real; lo que llegue mientras tanto
+            # (este down incluido) se reproduce en orden cuando vence el plazo.
+            pen.hover(m["x"], m["y"], *_tilt(m))
+            _pen_arming = True
+            _pen_deferred.append(m)
+            asyncio.get_running_loop().call_later(PEN_ARM_MS / 1000, _pen_flush)
+            return
         pen.set_barrel(m.get("btn") == 2)
         pen.down(m["x"], m["y"], m.get("p", 0), *_tilt(m))
     elif ev == "up":
         pen.up(m["x"], m["y"], *_tilt(m))
         pen.set_barrel(False)
         # iPad sin hover: no va a avisar que el lápiz se alejó. Si no llega nada más, salir de alcance.
-        asyncio.get_running_loop().call_later(0.5, pen.leave_if_idle, pen.last)
+        asyncio.get_running_loop().call_later(PEN_LEAVE_S, pen.leave_if_idle, pen.last)
     elif ev == "leave":
         pen.leave()
     elif ev == "eraser":
@@ -645,14 +677,16 @@ async def app_loop():
             continue
         try:
             exe, title = foreground_app()
-        except OSError:
-            continue
-        if not exe:                          # sin ventana activa (escritorio, bloqueo): dejar el perfil que estaba
-            continue
-        if exe != app_state["exe"]:
-            app_state.update(exe=exe, title=title)
-            log.info("app activa: %s (%s)", exe, title[:60])
-            await send_ipads(app_msg())
+            if not exe:                      # sin ventana activa (escritorio, bloqueo): dejar el perfil que estaba
+                continue
+            if exe != app_state["exe"]:
+                app_state.update(exe=exe, title=title)
+                log.info("app activa: %s (%s)", exe, title[:60])
+                await send_ipads(app_msg())
+        except asyncio.CancelledError:
+            raise
+        except Exception:                    # OSError de Windows o un visor caído: no matar el bucle
+            log.exception("app_loop: error (sigo)")
 
 
 async def ws_handler(request):
@@ -733,25 +767,36 @@ async def status_loop():
     last_f, last_b, last_t = 0, 0, time.monotonic()
     while True:
         await asyncio.sleep(2)
-        now = time.monotonic()
-        dt = now - last_t
-        fps = (capture.frames - last_f) / dt
-        mbps = (capture.bytes - last_b) * 8 / dt / 1e6
-        last_f, last_b, last_t = capture.frames, capture.bytes, now
-        if state["ipads"]:
-            quality.tick(list(state["ipads"]), capture.fps if capture.proc else 0)
-            await capture.restart_if_needed()  # cambió el refresco del monitor, el transporte de un visor o la calidad
-            if capture.proc is not None and capture.output_idx is not None:
-                await stills.start(capture.output_idx)
-        st = {"type": "status", "viewers": len(state["ipads"]), "capturing": capture.proc is not None,
-              "fps": round(fps), "mbps": round(mbps, 1), "target": target_info(), "bitrate": capture.bitrate,
-              "still": stills.current_png is not None, "stills_sent": stills.sent,
-              "transports": sorted({getattr(w, "_transport", "net") for w in state["ipads"]}),
-              "quality": dict(quality.info(), width=capture.width, height=capture.height, fps=capture.fps, keyframes=KEYFRAMES),
-              "input_ms": {"p50": pct(input_lat, 50), "p95": pct(input_lat, 95)},
-              "viewer_stats": [getattr(w, "_stats", None) for w in state["ipads"] if getattr(w, "_stats", None)]}
-        for w in list(state["status"]):
-            await send(w, st)
+        # Nada de lo que pase acá puede matar el bucle: de él dependen la calidad adaptativa, el detector de imagen
+        # fija y pc.html. (Medido: una excepción no capturada lo mataba en silencio y el iPad quedaba clavado en el
+        # nivel de calidad del momento, sin imagen fija y sin datos en pc.html.)
+        try:
+            now = time.monotonic()
+            dt = now - last_t
+            fps = (capture.frames - last_f) / dt
+            mbps = (capture.bytes - last_b) * 8 / dt / 1e6
+            last_f, last_b, last_t = capture.frames, capture.bytes, now
+            if state["ipads"]:
+                quality.tick(list(state["ipads"]), capture.fps if capture.proc else 0)
+                await capture.restart_if_needed()  # cambió el refresco del monitor, el transporte de un visor o la calidad
+                if capture.proc is not None and capture.output_idx is not None:
+                    await stills.start(capture.output_idx)
+            st = {"type": "status", "viewers": len(state["ipads"]), "capturing": capture.proc is not None,
+                  "fps": round(fps), "mbps": round(mbps, 1), "target": target_info(), "bitrate": capture.bitrate,
+                  "still": stills.current_png is not None, "stills_sent": stills.sent,
+                  "transports": sorted({getattr(w, "_transport", "net") for w in state["ipads"]}),
+                  "quality": dict(quality.info(), width=capture.width, height=capture.height, fps=capture.fps, keyframes=KEYFRAMES),
+                  "input_ms": {"p50": pct(input_lat, 50), "p95": pct(input_lat, 95)},
+                  "viewer_stats": [getattr(w, "_stats", None) for w in state["ipads"] if getattr(w, "_stats", None)]}
+            for w in list(state["status"]):
+                try:
+                    await send(w, st)
+                except (ConnectionResetError, RuntimeError):   # pc.html se cerró entre el chequeo y el envío
+                    state["status"].discard(w)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("status_loop: error en un tick (sigo)")
 
 
 # ---------------------------------------------------------------- http
@@ -799,13 +844,26 @@ async def main():
     print(f"  Monitor objetivo: {t['name']} {t['width']}x{t['height']} @ {t['hz']} Hz ({'virtual' if t['virtual'] else 'SIN monitor virtual: espejo'})")
     print(f"  Pencil:           {'lápiz virtual con presión (gamma %.2f, suavizado %.1f; el iPad los cambia desde su panel)' % (pen.gamma, pen.smooth) if pen.available else 'mouse (sin presión: Windows sin pointer injection)'}")
     print("=" * 60, flush=True)
-    asyncio.create_task(status_loop())
-    asyncio.create_task(app_loop())
+    def _watch(task):
+        """Si un bucle de fondo termina igual, que quede en el log con su traceback (y no solo al recolectar la tarea)."""
+        if not task.cancelled() and task.exception() is not None:
+            log.error("tarea %s terminó con error", task.get_name(), exc_info=task.exception())
+    app["bg"] = [asyncio.create_task(status_loop(), name="status_loop"), asyncio.create_task(app_loop(), name="app_loop")]
+    for task in app["bg"]:
+        task.add_done_callback(_watch)
     while True:
         await asyncio.sleep(3600)
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # Consola y server.log (rotativo, 5 MB x 3) en la carpeta del proyecto: las stats del iPad y cualquier error quedan
+    # para diagnosticar después sin estar mirando la ventana.
+    from logging.handlers import RotatingFileHandler
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    file_handler = RotatingFileHandler(Path(__file__).parent / "server.log", maxBytes=5_000_000, backupCount=2, encoding="utf-8")
+    file_handler.setFormatter(fmt)
+    logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler(), file_handler])
+    for h in logging.getLogger().handlers:
+        h.setFormatter(fmt)
     logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
     asyncio.run(main())

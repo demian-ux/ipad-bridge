@@ -35,7 +35,8 @@ quieta se ven los píxeles exactos de Windows. El Pencil y los toques vuelven a 
    iPad), ⚙ panel de presión, previsualización, gestos y perfil, ✕ ocultar (queda una pestaña para volver). Toque
    largo en ≡ la pasa al otro borde (se recuerda). Las teclas van a la ventana activa de Windows. Si el visor se
    desconecta, el servidor suelta los modificadores que hubieran quedado presionados. La app nativa conserva la barra
-   fija de siempre (modificadores, deshacer, rehacer, [ ], B, E).
+   fija de siempre (modificadores, deshacer, rehacer, [ ], B, E), horizontal abajo del lienzo para no tapar la barra
+   de herramientas de Photoshop; toque largo en ≡ la rota (abajo → derecha → izquierda, se recuerda).
 
 ## Instalar en otra PC (Windows 11 + GPU NVIDIA)
 
@@ -53,7 +54,9 @@ Si la IP de la PC cambia, `start.ps1` reemite el certificado del servidor solo; 
 
 - `install-vdd.ps1` instala el monitor virtual (Virtual Display Driver, MIT, firmado por SignPath), con resoluciones
   del iPad en `C:\VirtualDisplayDriverdd_settings.xml`. Pide administrador.
-- `python tools/place_vdd.py left|right [--hz=120]` ubica el monitor virtual y fija su refresco. Para 120 Hz primero
+- `python tools/place_vdd.py left|right [--hz=120] [--scale=225]` ubica el monitor virtual, fija su refresco y la escala
+  de Windows de ese monitor (225 % deja la interfaz de Photoshop cómoda en 13"; `setup.ps1` lo deja así). Si Windows
+  tenía el monitor virtual desconectado del escritorio (el servidor arranca en "espejo"), lo vuelve a conectar. Para 120 Hz primero
   `set-vdd-120.ps1` (admin) agrega el modo al driver. El servidor captura a los fps del refresco, con tope 60 (MAX_FPS):
   NVENC no sostiene 2732x2048 HEVC 10b a 120 fps con movimiento real y el video se traba.
 - iPad: abrí http://192.168.1.15/ y seguí los pasos: instalar el certificado (perfil) y activar su confianza en
@@ -65,7 +68,10 @@ Si la IP de la PC cambia, `start.ps1` reemite el certificado del servidor solo; 
 ## Pencil como tableta (lápiz virtual)
 
 El servidor crea un lápiz sintético con `CreateSyntheticPointerDevice(PT_PEN)` e inyecta cada evento del Pencil con
-`InjectSyntheticPointerInput` (Windows 10 1809+, sin driver ni administrador). Windows lo entrega a las apps como
+`InjectSyntheticPointerInput` (Windows 10 1809+, sin driver ni administrador). Ojo: a diferencia de `SendInput`, esa
+API toma la posición relativa a la esquina superior izquierda del escritorio virtual, no en coordenadas de pantalla;
+con el monitor virtual a la izquierda del principal el origen es negativo y `winput.py` lo resta antes de inyectar (sin
+eso el trazo cae fuera de pantalla y Windows lo descarta: el Pencil "no hace nada"). Windows lo entrega a las apps como
 WM_POINTER de lápiz con presión (0..1024), inclinación X/Y y botón lateral, y genera el mouse equivalente para las apps
 sin soporte de lápiz (medido con una ventana de prueba: presión y tilt llegan; el contacto produce clic izquierdo marcado
 como tableta y el botón lateral clic derecho). Lo que manda el iPad: la trayectoria completa del Pencil (toques
@@ -90,6 +96,13 @@ pincel sigue al lápiz sin tocar), `leave` cuando se aleja, y la goma del doble 
   con su edad y al levantar el lápiz o cambiar de herramienta no queda nada.
 - `PEN_TAP_KEYS` ("e,b"): atajos del doble toque del Pencil, "activar goma,volver". Windows no deja emular el lado goma
   de un lápiz sintético (las banderas INVERTED/ERASER no llegan a la app, medido), por eso va por teclado a la ventana activa.
+- `PEN_ARM_MS` (30) y `PEN_LEAVE_S` (1.5): en un iPad sin hover el Pencil "aparece" ya tocando. El servidor entra en
+  alcance primero y toca `PEN_ARM_MS` ms después (encolando lo que llegue mientras), como un lápiz real que se acerca
+  antes de apoyar, y tras soltar espera `PEN_LEAVE_S` s quieto antes de salir de alcance. Sin esto Photoshop con
+  Windows Ink solía perder el primer trazo tras una pausa (ENTER y DOWN en el mismo instante). 0 desactiva el retardo.
+- Presión: el iPad manda la fuerza del Pencil como número continuo (`UITouch.force`, Apple no publica niveles) y el
+  lápiz sintético de Windows la recibe en 0..1024 (`POINTER_PEN_INFO.pressure`), que es lo que Windows Ink entrega a
+  cualquier app: 1024 niveles es el tope de esa API, no del Pencil. Para más haría falta un driver HID propio (Fase 3).
 - Photoshop: usa Windows Ink de fábrica; si alguna vez se forzó WinTab, en PSUserConfig.txt debe decir `UseSystemStylus 1`.
 - Windows > Ajustes > Lápiz y Windows Ink: apagar "Mantener presionado para clic derecho" si el inicio del trazo se
   siente retrasado, y las animaciones visuales del lápiz (el dispositivo sintético ya pide `POINTER_FEEDBACK_NONE`).

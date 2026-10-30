@@ -40,7 +40,7 @@ if (Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object { $_
     powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "install-vdd.ps1")
     Start-Sleep -Seconds 3
 }
-python tools\place_vdd.py left --hz=120
+python tools\place_vdd.py left --hz=120 --scale=225   # a la izquierda, 120 Hz, interfaz de Windows al 225 % en el iPad
 
 Write-Host "== 6/6 Certificados para esta PC =="
 python tools\make_certs.py

@@ -146,7 +146,7 @@ final class TouchVideoView: UIView, UIPencilInteractionDelegate {
             leaveWork?.cancel(); leaveWork = nil
             guard !penDown, let (x, y) = norm(g.location(in: self)) else { return }
             var m: [String: Any] = ["ev": "hover", "pen": 1, "x": x, "y": y]
-            if #available(iOS 16.1, *) {
+            if #available(iOS 16.4, *) {   // altitudeAngle / azimuthAngle(in:) del hover existen desde 16.4
                 let (tx, ty) = tilt(g.altitudeAngle, g.azimuthAngle(in: self))
                 m["tx"] = tx; m["ty"] = ty
             }

@@ -195,7 +195,7 @@ async function setupDecoder(m){
   for(const b of q)onVideoChunk(b);
   if(waitingKey)needKey();   // el IDR no venía con el vconfig (nos sumamos a una captura en marcha): pedirlo
 }
-let configuring=false, pending=[], rafPending=false, keyAsk=0;
+let configuring=false, pending=[], rafPending=false, keyAsk=0, qHighSince=0;
 // Pedir keyframe. Con intra-refresh el servidor reinicia el encoder; si no llega en 1,5 s (se ignoró por reciente), insistir.
 function needKey(){
   waitingKey=true;if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'need-key'}));
@@ -206,8 +206,16 @@ function onVideoChunk(buf){
   if(!decoder||decoder.state!=='configured')return;
   const dv=new DataView(buf);const key=dv.getUint8(0)===1, ts=dv.getFloat64(1);   // ts: reloj del servidor en ms
   meas.bytes+=buf.byteLength-9;
-  if(waitingKey){if(!key){meas.drops++;meas.dropsSincePing++;return;}waitingKey=false;clearTimeout(keyAsk);}
-  if(decoder.decodeQueueSize>6){meas.drops++;meas.dropsSincePing++;needKey();return;}
+  // Esperando el IDR: los deltas que llegan antes no se pueden decodificar, pero no son descartes por falta de
+  // recursos (no se cuentan: el servidor bajaba la calidad por ellos y cada keyframe pedido generaba más).
+  if(waitingKey){if(!key)return;waitingKey=false;clearTimeout(keyAsk);qHighSince=0;}
+  // Cola alta: por Wi-Fi un IDR grande o un corte de la red llegan de golpe y la cola sube un instante; el decodificador
+  // por hardware la vacía en pocos frames. Solo si sigue alta 400 ms se descarta y se pide keyframe (antes era inmediato
+  // y cada pedido reiniciaba el encoder, cuyo IDR volvía a llenar la cola: 30 reinicios en 2 minutos).
+  if(decoder.decodeQueueSize>6){
+    const now=performance.now();if(!qHighSince)qHighSince=now;
+    if(now-qHighSince>400){meas.drops++;meas.dropsSincePing++;qHighSince=0;needKey();return;}
+  }else qHighSince=0;
   try{decoder.decode(new EncodedVideoChunk({type:key?'key':'delta',timestamp:Math.round(ts*1000),data:new Uint8Array(buf,9)}));}
   catch(e){meas.drops++;meas.dropsSincePing++;needKey();}
 }

@@ -477,7 +477,14 @@ class Pen:
         return fx, fy, fp
 
     def _inject(self, flags, nx, ny, p=0.0, tx=0, ty=0):
+        # Dentro del monitor: un punto fuera del escritorio virtual hace fallar la inyección con ERROR_INVALID_PARAMETER.
+        nx, ny = min(1.0, max(0.0, float(nx))), min(1.0, max(0.0, float(ny)))
         px, py = self.mouse.pixel(nx, ny)
+        # InjectSyntheticPointerInput toma ptPixelLocation relativa a la esquina superior izquierda del escritorio
+        # virtual (documentado), no en coordenadas de pantalla como SendInput. Con el monitor virtual a la izquierda
+        # del principal el origen es negativo (p. ej. -2732, 0): sin restar, todo el trazo cae fuera de pantalla y
+        # Windows lo descarta (medido: el lápiz no llegaba al iPad, un trazo pedido en x=1000 caía en x=-1732).
+        px, py = px - self.mouse.vx, py - self.mouse.vy
         info = POINTER_TYPE_INFO()
         info.type = PT_PEN
         pi = info.penInfo.pointerInfo
@@ -498,7 +505,8 @@ class Pen:
         self._last_pos = (nx, ny)
         if not user32.InjectSyntheticPointerInput(self.dev, ctypes.byref(info), 1):
             err = ctypes.GetLastError()
-            log.warning("InjectSyntheticPointerInput falló (error %d, flags 0x%x); reinicio el lápiz", err, flags)
+            log.warning("InjectSyntheticPointerInput falló (error %d, flags 0x%x, px=%d py=%d p=%.2f tilt=%d,%d inrange=%s contact=%s); reinicio el lápiz",
+                        err, flags, px, py, p, int(tx), int(ty), self.inrange, self.contact)
             # Estado desincronizado (p. ej. UP sin DOWN): recrear el dispositivo deja todo fuera de alcance.
             self.close()
             self._open()

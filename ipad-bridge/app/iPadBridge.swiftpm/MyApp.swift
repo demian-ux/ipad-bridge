@@ -17,7 +17,9 @@ struct MyApp: App {
 
 struct ContentView: View {
     @EnvironmentObject var bridge: Bridge
-    @AppStorage("keyBarRight") private var keyBarRight = false   // lado de la barra de teclas (toque largo en ≡)
+    // Lado de la barra de teclas: "bottom" (horizontal, abajo; no tapa la barra de herramientas de Photoshop, que va a
+    // la izquierda), "left" o "right" (vertical). Toque largo en ≡ la rota: abajo → derecha → izquierda.
+    @AppStorage("keyBarPos") private var keyBarPos = "bottom"
     @State private var keyBarHidden = false
 
     var body: some View {
@@ -50,52 +52,74 @@ struct ContentView: View {
             // Barra de teclas (estilo ExpressKeys). Es una vista SwiftUI encima del video, fuera de TouchVideoView:
             // así un dedo la usa mientras el Pencil dibuja (touchesBegan ignora los dedos con penDown) y el Pencil
             // sobre un botón pulsa el botón en vez de trazar.
-            HStack(spacing: 0) {
-                if keyBarRight { Spacer() }
-                if keyBarHidden {
-                    KeyBarTab(right: keyBarRight) { keyBarHidden = false }
-                } else {
-                    KeyBar(bridge: bridge, right: $keyBarRight, hidden: $keyBarHidden)
+            if keyBarPos == "bottom" {
+                VStack(spacing: 0) {
+                    Spacer()
+                    HStack(spacing: 0) {
+                        Spacer()
+                        keyBar
+                        Spacer()
+                    }
                 }
-                if !keyBarRight { Spacer() }
+                .padding(.bottom, 6)
+            } else {
+                HStack(spacing: 0) {
+                    if keyBarPos == "right" { Spacer() }
+                    keyBar
+                    if keyBarPos != "right" { Spacer() }
+                }
+                .padding(.horizontal, 6)
             }
-            .padding(.horizontal, 6)
         }
         .onAppear { bridge.start() }
         .onDisappear { bridge.stop() }
     }
+
+    @ViewBuilder private var keyBar: some View {
+        if keyBarHidden {
+            KeyBarTab(pos: keyBarPos) { keyBarHidden = false }
+        } else {
+            KeyBar(bridge: bridge, pos: $keyBarPos, hidden: $keyBarHidden)
+        }
+    }
 }
 
-// MARK: - Barra lateral de teclas
+// MARK: - Barra de teclas
 
-/// Tira vertical estrecha y semitransparente: modificadores que se mantienen mientras se toca el botón
-/// (Shift = línea recta, Ctrl, Alt = cuentagotas, Espacio = mano) y pulsaciones (deshacer, rehacer, tamaño de
-/// pincel, B, E). Toque largo en ≡ la cambia de lado; el ojo tachado la oculta (queda una pestaña para volver).
+/// Tira estrecha y semitransparente: modificadores que se mantienen mientras se toca el botón (Shift = línea recta,
+/// Ctrl, Alt = cuentagotas, Espacio = mano) y pulsaciones (deshacer, rehacer, tamaño de pincel, B, E). Horizontal
+/// abajo o vertical en un borde; toque largo en ≡ la rota (abajo → derecha → izquierda); el ojo tachado la oculta
+/// (queda una pestaña para volver).
 struct KeyBar: View {
     let bridge: Bridge
-    @Binding var right: Bool
+    @Binding var pos: String
     @Binding var hidden: Bool
 
+    private var horizontal: Bool { pos == "bottom" }
+
     var body: some View {
-        VStack(spacing: 4) {
+        let layout = horizontal ? AnyLayout(HStackLayout(spacing: 4)) : AnyLayout(VStackLayout(spacing: 4))
+        layout {
             Image(systemName: "line.3.horizontal")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.5))
-                .frame(width: 44, height: 24)
+                .frame(width: horizontal ? 24 : 44, height: horizontal ? 44 : 24)
                 .contentShape(Rectangle())
-                .onLongPressGesture(minimumDuration: 0.5) { right.toggle() }
+                .onLongPressGesture(minimumDuration: 0.5) {
+                    pos = pos == "bottom" ? "right" : (pos == "right" ? "left" : "bottom")
+                }
             HoldKey(bridge: bridge, key: "shift", label: "⇧", caption: "shift")
             HoldKey(bridge: bridge, key: "ctrl", label: "⌃", caption: "ctrl")
             HoldKey(bridge: bridge, key: "alt", label: "⌥", caption: "alt")
             HoldKey(bridge: bridge, key: "space", label: "␣", caption: "esp")
-            KeyDivider()
+            KeyDivider(horizontal: horizontal)
             TapKey(bridge: bridge, keys: "ctrl+z", symbol: "arrow.uturn.backward", caption: "deshacer")
             TapKey(bridge: bridge, keys: "ctrl+shift+z", symbol: "arrow.uturn.forward", caption: "rehacer")
             TapKey(bridge: bridge, keys: "[", label: "[", caption: "pincel −")
             TapKey(bridge: bridge, keys: "]", label: "]", caption: "pincel +")
             TapKey(bridge: bridge, keys: "b", label: "B", caption: "pincel") { bridge.penHud = "" }
             TapKey(bridge: bridge, keys: "e", label: "E", caption: "goma") { bridge.penHud = "GOMA" }
-            KeyDivider()
+            KeyDivider(horizontal: horizontal)
             Button { hidden = true } label: { KeyCap(symbol: "eye.slash", caption: "ocultar") }
                 .buttonStyle(KeyCapStyle())
         }
@@ -107,15 +131,15 @@ struct KeyBar: View {
 
 /// Pestaña que queda en el borde cuando la barra está oculta.
 struct KeyBarTab: View {
-    let right: Bool
+    let pos: String
     let show: () -> Void
 
     var body: some View {
         Button(action: show) {
-            Image(systemName: right ? "chevron.left" : "chevron.right")
+            Image(systemName: pos == "bottom" ? "chevron.up" : (pos == "right" ? "chevron.left" : "chevron.right"))
                 .font(.system(size: 12, weight: .bold))
                 .foregroundStyle(.white.opacity(0.6))
-                .frame(width: 18, height: 56)
+                .frame(width: pos == "bottom" ? 56 : 18, height: pos == "bottom" ? 18 : 56)
                 .background(Color.black.opacity(0.4), in: Capsule())
         }
         .buttonStyle(.plain)
@@ -207,8 +231,13 @@ struct KeyCapStyle: ButtonStyle {
     }
 }
 
+/// Separador: una línea fina, horizontal en la barra vertical y vertical en la barra horizontal.
 struct KeyDivider: View {
+    var horizontal = false
+
     var body: some View {
-        Rectangle().fill(Color.white.opacity(0.15)).frame(width: 32, height: 1).padding(.vertical, 1)
+        Rectangle().fill(Color.white.opacity(0.15))
+            .frame(width: horizontal ? 1 : 32, height: horizontal ? 32 : 1)
+            .padding(horizontal ? .horizontal : .vertical, 1)
     }
 }
