@@ -2,6 +2,7 @@ import Foundation
 import Network
 import CoreMedia
 import AVFoundation
+import UIKit
 
 // Protocolo por TCP (la PC se conecta al iPad, por USB vía usbmux o por IP):
 //   cada mensaje = u32 big-endian (largo) + u8 tipo + payload
@@ -14,10 +15,15 @@ import AVFoundation
 //     {"ev":"moves","pts":[[x,y,p,tx,ty],...]} (toques coalescidos), {"ev":"leave"}, {"ev":"eraser","on":bool}
 //     Barra de teclas (sin "pen"): {"ev":"key","keys":"ctrl+z"} pulsación, {"ev":"mod","key":"shift|ctrl|alt|space","down":bool}
 //   tipo 17 iPad->PC need-key: pedir keyframe
-//   tipo 18 iPad->PC JSON de control: {"type":"ping","t":reloj iPad ms,"q","d","rtt"} cada 2 s, {"type":"stats",...} cada 5 s
-//   tipo 19 PC->iPad JSON de control: {"type":"pong","t","mt":reloj PC ms,"inp50","inp95",...}
+//   tipo 18 iPad->PC JSON de control: {"type":"ping","t":reloj iPad ms,"q","d","rtt"} cada 2 s, {"type":"stats",...} cada 5 s,
+//     {"type":"sleeping"} al irse al fondo (la PC detiene la captura), {"type":"wake"} al volver, {"type":"closing"} al cerrar
+//   tipo 19 PC->iPad JSON de control: {"type":"pong","t","mt":reloj PC ms,"inp50","inp95",...}, {"type":"welcome",name,id},
+//     {"type":"transport","transport":"usb|net"} (el puente migró la sesión), {"type":"app",exe,title} (ventana activa)
+//   tipo 0 PC->iPad latido cada 2 s: se devuelve tal cual (tipo 0, sin payload). 5 s sin bytes de la PC = conexión muerta.
 //   Reloj sincronizado estilo NTP (offset de la muestra de menor RTT de las últimas 15); el input lleva "t" en el reloj
 //   de la PC para medir la latencia de input, y cada frame trae ts (f64, reloj de la PC en ms al salir del encoder).
+// Por red la PC no sabe dónde está el iPad: la app la encuentra por Bonjour (Discovery.swift) y le pide por http
+// (GET /connect) que su puente se conecte acá, con el token guardado o con el código de 6 dígitos que muestra la PC.
 
 final class Bridge: ObservableObject {
     static let port: UInt16 = 7777
@@ -26,9 +32,20 @@ final class Bridge: ObservableObject {
     @Published var hud = ""
     @Published var addresses = ""
     @Published var penHud = ""      // "GOMA" mientras el doble toque del Pencil tiene la goma activa
+    @Published var pcName = ""      // nombre de la PC (welcome)
+    @Published var transport = ""   // "usb" o "net" según el puente
+    // Conexión por red pedida desde la app (/connect): PC elegida, si la PC pide el código y el último error.
+    @Published var selectedPC: PC?
+    @Published var needCode = false
+    @Published var connectError = ""
+    @Published var requesting = false
 
     private var listener: NWListener?
     private var conn: NWConnection?
+    private var lastRx = Date()
+    private var inBackground = false
+    private var connectRetry = 0
+    private var connectWork: DispatchWorkItem?
     private let queue = DispatchQueue(label: "bridge.net")
     private var format: CMVideoFormatDescription?
     private var nalLength = 4
@@ -57,8 +74,19 @@ final class Bridge: ObservableObject {
         guard listener == nil else { return }
         addresses = localIPs().joined(separator: "  ")
         openListener()
+        observeLifecycle()
+        if let id = UserDefaults.standard.string(forKey: "lastPC"), let pc = storedPC(id) {
+            selectedPC = pc                       // la última PC usada por red: pedirle conexión apenas abre la app
+            scheduleConnectRequest(after: 1)
+        }
         statsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             guard let s = self else { return }
+            // Liveness: la PC manda un latido cada 2 s (y video); 5 s sin nada = el cable se soltó o el puente murió.
+            // Se corta acá para que el puente, al volver, encuentre el puerto libre (no sobre una conexión zombi).
+            if let c = s.conn, Date().timeIntervalSince(s.lastRx) > 5 {
+                DispatchQueue.main.async { s.status = "La PC dejó de responder; esperando que vuelva…" }
+                c.cancel()
+            }
             let mbps = Double(s.bytes * 8) / 1e6
             let a = s.arrival.sorted()
             let p50 = a.isEmpty ? -1 : a[a.count / 2], p95 = a.isEmpty ? -1 : a[min(a.count - 1, a.count * 95 / 100)]
@@ -115,9 +143,126 @@ final class Bridge: ObservableObject {
     }
 
     func stop() {
+        sendJSON(["type": "closing"])
         conn?.cancel(); conn = nil
         listener?.cancel(); listener = nil
         statsTimer?.invalidate(); statsTimer = nil
+        connectWork?.cancel(); connectWork = nil
+    }
+
+    // MARK: - Fondo / primer plano
+
+    /// Al irse al fondo avisa `sleeping` (la PC detiene la captura si no queda otro visor); al volver, `wake` y pide un
+    /// keyframe (el decodificador perdió el hilo mientras tanto). iOS suele matar el TCP de una app suspendida: si la
+    /// conexión murió, el puente de la PC la vuelve a abrir solo (por USB) o la app vuelve a pedir /connect (por red).
+    private func observeLifecycle() {
+        let nc = NotificationCenter.default
+        nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: nil) { [weak self] _ in
+            guard let self = self else { return }
+            self.inBackground = true
+            self.sendJSON(["type": "sleeping"])
+        }
+        nc.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: nil) { [weak self] _ in
+            guard let self = self else { return }
+            self.inBackground = false
+            self.lastRx = Date()
+            if self.conn != nil {
+                self.sendJSON(["type": "wake"])
+                self.requestKeyframe()
+                self.onFlush?()
+            } else {
+                self.scheduleConnectRequest(after: 0.5)
+            }
+        }
+    }
+
+    // MARK: - Pedido de conexión por red (/connect)
+
+    private func storedPC(_ id: String) -> PC? {
+        guard let d = UserDefaults.standard.dictionary(forKey: "pc." + id) as? [String: String],
+              let name = d["name"], let ip = d["ip"] else { return nil }
+        return PC(id: id, name: name, ip: ip, httpPort: Int(d["http"] ?? "") ?? 80, httpsPort: d["https"].flatMap { Int($0) })
+    }
+
+    /// El usuario eligió una PC (de la lista de Bonjour o por IP): pedirle que se conecte acá. `code` solo la primera vez.
+    func connect(to pc: PC, code: String? = nil) {
+        selectedPC = pc
+        connectError = ""
+        UserDefaults.standard.set(pc.id, forKey: "lastPC")
+        UserDefaults.standard.set(["name": pc.name, "ip": pc.ip, "http": String(pc.httpPort),
+                                   "https": pc.httpsPort.map { String($0) } ?? ""], forKey: "pc." + pc.id)
+        connectRetry = 0
+        requestConnect(code: code)
+    }
+
+    /// Dejar de insistir con esa PC (botón "otra PC").
+    func forgetSelection() {
+        connectWork?.cancel(); connectWork = nil
+        selectedPC = nil
+        needCode = false
+        connectError = ""
+        UserDefaults.standard.removeObject(forKey: "lastPC")
+    }
+
+    private func requestConnect(code: String?) {
+        guard let pc = selectedPC, conn == nil, !inBackground else { return }
+        var comps = URLComponents(string: pc.httpBase + "/connect")!
+        var items = [URLQueryItem(name: "name", value: UIDevice.current.name), URLQueryItem(name: "port", value: String(Bridge.port))]
+        if let code = code, !code.isEmpty {
+            items.append(URLQueryItem(name: "code", value: code))
+        } else if let tok = UserDefaults.standard.string(forKey: "token." + pc.id) {
+            items.append(URLQueryItem(name: "token", value: tok))
+        }
+        comps.queryItems = items
+        guard let url = comps.url else { return }
+        requesting = true
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 4
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, err in
+            guard let self = self else { return }
+            DispatchQueue.main.async { self.handleConnectReply(pc: pc, data: data, http: (resp as? HTTPURLResponse)?.statusCode, error: err) }
+        }.resume()
+    }
+
+    private func handleConnectReply(pc: PC, data: Data?, http: Int?, error: Error?) {
+        requesting = false
+        let m = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        if let error = error {
+            connectError = "No llego a \(pc.name): \(error.localizedDescription)"
+            scheduleConnectRequest(after: backoff())
+            return
+        }
+        let serverError = (m["error"] as? String) ?? ""
+        if http == 401 {
+            // Hace falta el código (nunca emparejado, o el token venció): la vista muestra el campo.
+            if serverError.isEmpty { UserDefaults.standard.removeObject(forKey: "token." + pc.id) }
+            needCode = true
+            connectError = serverError
+            return
+        }
+        guard m["ok"] as? Bool == true else {
+            connectError = "Respuesta rara de la PC (\(http ?? 0))"
+            scheduleConnectRequest(after: backoff())
+            return
+        }
+        needCode = false
+        if let tok = m["token"] as? String { UserDefaults.standard.set(tok, forKey: "token." + pc.id) }
+        if let name = m["name"] as? String { pcName = name }
+        status = "\(pcName.isEmpty ? pc.name : pcName) avisada; esperando que su puente se conecte…"
+        // Si en unos segundos no llegó la conexión (puente caído, otra red), volver a pedir con espera creciente.
+        scheduleConnectRequest(after: max(3, backoff()))
+    }
+
+    private func backoff() -> TimeInterval {
+        connectRetry += 1
+        return min(16, 2 * pow(2, Double(connectRetry - 1)))
+    }
+
+    private func scheduleConnectRequest(after s: TimeInterval) {
+        connectWork?.cancel()
+        let w = DispatchWorkItem { [weak self] in self?.requestConnect(code: nil) }
+        connectWork = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + s, execute: w)
     }
 
     private func accept(_ c: NWConnection) {
@@ -125,11 +270,14 @@ final class Bridge: ObservableObject {
         conn = c
         format = nil
         waitingKey = true
+        lastRx = Date()
+        connectWork?.cancel(); connectWork = nil
+        connectRetry = 0
         c.stateUpdateHandler = { [weak self] st in
             guard let self = self else { return }
             switch st {
             case .ready:
-                DispatchQueue.main.async { self.status = "PC conectada, esperando video…" }
+                DispatchQueue.main.async { self.status = "PC conectada, esperando video…"; self.needCode = false }
                 self.send(type: 17, payload: Data())
                 self.readMessage()
             case .failed(let e):
@@ -147,7 +295,11 @@ final class Bridge: ObservableObject {
         if conn === c {
             conn = nil
             onFlush?()
-            DispatchQueue.main.async { self.status = "Esperando a la PC…"; self.hud = "" }
+            DispatchQueue.main.async {
+                self.status = "Esperando a la PC…"; self.hud = ""; self.transport = ""
+                // Por red, la PC no vuelve sola: pedirle de nuevo (por USB el puente reconecta por su cuenta).
+                if self.selectedPC != nil && !self.inBackground { self.scheduleConnectRequest(after: 2) }
+            }
         }
     }
 
@@ -161,6 +313,7 @@ final class Bridge: ObservableObject {
             guard len > 0 && len < 32_000_000 else { self.conn?.cancel(); return }
             c.receive(minimumIncompleteLength: len, maximumLength: len) { [weak self] body, _, _, err2 in
                 guard let self = self, let b = body, b.count == len, err2 == nil else { self?.conn?.cancel(); return }
+                self.lastRx = Date()
                 self.handle(type: b[b.startIndex], payload: b.dropFirst())
                 self.readMessage()
             }
@@ -169,6 +322,8 @@ final class Bridge: ObservableObject {
 
     private func handle(type: UInt8, payload: Data) {
         switch type {
+        case 0:
+            send(type: 0, payload: Data())     // latido del puente: devolverlo (así sabe que seguimos acá)
         case 2:
             let p = Data(payload)
             guard p.count > 1 else { return }
@@ -183,8 +338,8 @@ final class Bridge: ObservableObject {
         case 4:
             onStill?(nil)
         case 19:
-            if let m = try? JSONSerialization.jsonObject(with: Data(payload)) as? [String: Any], m["type"] as? String == "pong" {
-                handlePong(m)
+            if let m = try? JSONSerialization.jsonObject(with: Data(payload)) as? [String: Any] {
+                handleControl(m)
             }
         case 1:
             guard let fmt = format, payload.count > 9 else { return }
@@ -203,6 +358,25 @@ final class Bridge: ObservableObject {
                 onSample?(sample)
             }
         default: break
+        }
+    }
+
+    /// JSON de control de la PC (tipo 19): pong, welcome, transport, app, auth.
+    private func handleControl(_ m: [String: Any]) {
+        switch m["type"] as? String {
+        case "pong":
+            handlePong(m)
+        case "welcome":
+            let name = m["name"] as? String ?? ""
+            DispatchQueue.main.async { self.pcName = name; self.needCode = false }
+        case "transport":
+            let t = m["transport"] as? String ?? ""
+            DispatchQueue.main.async { self.transport = t }
+        case "auth":
+            // La PC pide emparejar al puente: no debería pasar (el puente corre en la PC); avisar y seguir esperando.
+            DispatchQueue.main.async { self.status = "La PC pide emparejamiento al puente (revisá PAIRING en server.py)" }
+        default:
+            break   // "app" (ventana activa) y lo que venga: la barra fija de la app no lo usa todavía
         }
     }
 

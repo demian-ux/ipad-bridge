@@ -1,11 +1,15 @@
 """Visor de medición sin iPad: se conecta al servidor como un visor más y mide lo que llega.
 Uso: python tools/stream_probe.py [ws://localhost:8080/ws] [segundos=20] [--transport=usb|net] [--dump=salida.hevc]
                                   [--need-key=8] [--quality=auto|draw|motion] [--sick=4]
+                                  [--code=123456 | --token=…] [--silent=N] [--sleep=N] [--name=…]
 Imprime por segundo frames, keyframes, Mbps y tamaño medio de key/delta; al final un resumen JSON con el tiempo hasta
 la primera imagen (hello -> vconfig -> primer keyframe), el RTT y offset del reloj (ping/pong) y, con --need-key=N,
 cuánto tardó en llegar un keyframe tras pedirlo en el segundo N. --dump guarda el flujo en Annex B (VPS/SPS/PPS al
 frente) para decodificarlo con ffmpeg y medir ΔE con tools/color_check.py. --sick=N simula desde el segundo N un visor
-que sufre (cola 5 y descartes en cada ping) para ver cómo baja la calidad adaptativa, y a los N+20 s vuelve a estar bien."""
+que sufre (cola 5 y descartes en cada ping) para ver cómo baja la calidad adaptativa, y a los N+20 s vuelve a estar bien.
+Emparejamiento: desde esta PC el servidor acepta sin código (salvo PAIRING_LOCAL=0); --code manda el código de pc.html y
+--token un token guardado; se imprime el welcome (con el token) o el auth. --silent=N deja de mandar ping en el segundo N
+(el servidor debe cerrar a los ~5 s: liveness). --sleep=N manda sleeping en N y wake + need-key en N+5."""
 import asyncio
 import base64
 import json
@@ -47,7 +51,14 @@ async def main():
     sec = {"n": 0, "key": 0, "bytes": 0, "kbytes": 0, "dbytes": 0, "t": t0}
     async with aiohttp.ClientSession() as s:
         async with s.ws_connect(url, max_msg_size=64 * 1024 * 1024, ssl=False) as ws:
-            await ws.send_str(json.dumps({"type": "hello", "role": "ipad", "transport": opts.get("transport", "net")}))
+            hello = {"type": "hello", "role": "ipad", "transport": opts.get("transport", "net"), "name": opts.get("name", "stream_probe")}
+            for k in ("code", "token"):
+                if k in opts:
+                    hello[k] = opts[k]
+            await ws.send_str(json.dumps(hello))
+            silent_at = float(opts["silent"]) if "silent" in opts else None
+            sleep_at = float(opts["sleep"]) if "sleep" in opts else None
+            wake_at = None
             if "quality" in opts:
                 await ws.send_str(json.dumps({"type": "quality", "mode": opts["quality"]}))
             need_sent = None
@@ -89,6 +100,9 @@ async def main():
                             if dump:
                                 for nal in hvcc_nals(base64.b64decode(m["description"])):
                                     dump.write(b"\x00\x00\x00\x01" + nal)
+                        elif m["type"] in ("welcome", "auth"):
+                            print(f"[probe] {m['type']} {now - t0:5.1f} s: {m}", flush=True)
+                            res[m["type"]] = m
                         elif m["type"] == "pong":
                             rtt = (now - t0) * 1000 - m["t"]
                             res["rtt_ms"].append(round(rtt, 2))
@@ -97,12 +111,26 @@ async def main():
                                 print(f"[probe] pong {now - t0:5.1f} s: nivel {m.get('level')} escala {m.get('scale')} {m.get('br')} Mbps {m.get('fps')} fps", flush=True)
                     else:
                         break
+                res["closed_s"] = round(time.perf_counter() - t0, 2)
+                print(f"[probe] el servidor cerró la conexión a los {res['closed_s']} s", flush=True)
 
             task = asyncio.create_task(rx())
             while time.perf_counter() - t0 < secs:
                 await asyncio.sleep(0.05)
                 now = time.perf_counter()
-                if now >= next_ping:
+                if task.done():
+                    break
+                if sleep_at is not None and now - t0 >= sleep_at:
+                    await ws.send_str(json.dumps({"type": "sleeping"}))
+                    print(f"[probe] sleeping enviado en {now - t0:.1f} s", flush=True)
+                    sleep_at, wake_at = None, now - t0 + 5
+                if wake_at is not None and now - t0 >= wake_at:
+                    await ws.send_str(json.dumps({"type": "wake"}))
+                    await ws.send_str(json.dumps({"type": "need-key"}))
+                    need_sent = now
+                    print(f"[probe] wake + need-key enviados en {now - t0:.1f} s", flush=True)
+                    wake_at = None
+                if now >= next_ping and not (silent_at is not None and now - t0 >= silent_at):
                     next_ping = now + 2
                     sick = sick_at is not None and sick_at <= now - t0 < sick_at + 20
                     await ws.send_str(json.dumps({"type": "ping", "t": (now - t0) * 1000, "q": 5 if sick else 0, "d": 3 if sick else 0}))
@@ -118,7 +146,8 @@ async def main():
                     res["seconds"].append(row)
                     print("[probe]", json.dumps(row), flush=True)
                     sec.update(n=0, key=0, bytes=0, kbytes=0, dbytes=0, t=now)
-            task.cancel()
+            if not task.done():
+                task.cancel()
     if dump:
         dump.close()
     rows = res["seconds"][2:] or res["seconds"]

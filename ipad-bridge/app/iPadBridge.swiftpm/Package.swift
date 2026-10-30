@@ -19,7 +19,7 @@ let package = Package(
             supportedDeviceFamilies: [.pad],
             supportedInterfaceOrientations: [.landscapeLeft, .landscapeRight],
             capabilities: [
-                .localNetwork(purposeString: "Recibe la pantalla de la PC por cable o red local", bonjourServiceTypes: [])
+                .localNetwork(purposeString: "Recibe la pantalla de la PC por cable o red local", bonjourServiceTypes: ["_ipadbridge._tcp"])
             ]
         )
     ],

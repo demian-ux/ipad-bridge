@@ -12,3 +12,12 @@ __pycache__/
 /ipad-bridge.zip
 # configuración local de Claude
 .claude/settings.local.json
+# tokens de emparejamiento (hasheados) e id de la PC
+ipad-bridge/certs/pairing.json
+# descargas y salida del instalador
+ipad-bridge/installer/build/
+ipad-bridge/installer/out/
+
+# salida de tools/fake_app.py
+ipad-bridge/fake_*.bin
+ipad-bridge/fake_*.png

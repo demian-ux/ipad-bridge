@@ -12,7 +12,9 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-CERTS = Path(__file__).resolve().parent.parent / "certs"
+import os
+# Misma carpeta que usa server.py: la del proyecto, o IPADBRIDGE_CERTS cuando está instalado (datos del usuario)
+CERTS = Path(os.environ.get("IPADBRIDGE_CERTS") or Path(__file__).resolve().parent.parent / "certs")
 
 
 def local_ip():

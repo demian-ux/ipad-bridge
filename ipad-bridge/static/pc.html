@@ -1,32 +1,67 @@
 <!doctype html>
 <html lang="es"><head><meta charset="utf-8"><title>iPad Bridge · estado</title>
 <style>
- body{font:16px system-ui;margin:0;background:#111;color:#eee;padding:28px;max-width:640px}
+ body{font:16px system-ui;margin:0;background:#111;color:#eee;padding:28px;max-width:720px}
  .pill{display:inline-block;padding:6px 12px;border-radius:999px;background:#333;font-size:14px;margin:4px 6px 4px 0}
  .ok{background:#1f5c2e}.bad{background:#7a2323}
  .hint{color:#aaa;font-size:14px;line-height:1.6}
+ .pair{display:flex;gap:24px;align-items:center;margin:18px 0;padding:16px;background:#1a1a1a;border-radius:14px}
+ .pair img{width:180px;height:180px;background:#fff;border-radius:8px;padding:6px;box-sizing:border-box;flex:none}
+ .code{font:700 40px/1 ui-monospace,monospace;letter-spacing:6px;color:#fff;margin:6px 0}
+ .code small{display:block;font:13px system-ui;letter-spacing:0;color:#888;margin-top:6px}
+ button{font:inherit;background:#2d6cdf;color:#fff;border:0;border-radius:8px;padding:6px 12px;cursor:pointer}
+ ul{margin:4px 0;padding-left:18px}
+ code{background:#222;padding:1px 5px;border-radius:4px}
 </style></head><body>
-<h2>iPad Bridge</h2>
+<h2>iPad Bridge <span id="pcname" class="hint"></span></h2>
 <div><span id="cap" class="pill">…</span><span id="view" class="pill">…</span><span id="rate" class="pill">…</span></div>
 <p class="hint">Monitor del iPad: <b id="target">…</b><br>
 iPad: <b id="ipadurl">…</b> · primera vez: <b id="setupurl">…</b></p>
+
+<div class="pair" id="pairbox" hidden>
+ <img id="qr" alt="QR de emparejamiento">
+ <div>
+  <div class="hint">Emparejar un iPad: escaneá el QR con la cámara (abre Safari con el código puesto) o escribí este código en la
+  página o en la app. Cambia después de cada uso.</div>
+  <div class="code"><span id="code">······</span><small id="codenote"></small></div>
+  <button onclick="copyCode()">Copiar código</button>
+  <div class="hint" id="devices"></div>
+ </div>
+</div>
+<p class="hint" id="pairoff" hidden>Emparejamiento desactivado (<code>PAIRING=0</code>): cualquier visor de la red entra sin código.</p>
+
 <p class="hint">Calidad: <b id="quality">…</b><br>
 Medición del iPad (cada 5 s): <b id="stats">sin datos todavía</b></p>
-<p class="hint">No hay nada que tocar acá. La captura arranca sola cuando el iPad se conecta (página de Safari o app) y se detiene cuando se va.
-Mandá ventanas al iPad arrastrándolas hacia la izquierda o con Win+Shift+Flecha izquierda.</p>
+<p class="hint">No hay nada más que tocar acá. La captura arranca sola cuando el iPad se conecta (página de Safari o app) y se
+detiene cuando se va o se bloquea. Mandá ventanas al iPad arrastrándolas hacia la izquierda o con Win+Shift+Flecha izquierda.<br>
+<span id="mdns"></span> La página web necesita el QR o la dirección.</p>
 <script>
 const $=id=>document.getElementById(id);
+let code='';
+function copyCode(){if(code&&navigator.clipboard)navigator.clipboard.writeText(code);}
 function connectWS(){
   const ws=new WebSocket('ws://'+location.host+'/ws');
   ws.onopen=()=>ws.send(JSON.stringify({type:'hello',role:'status'}));
   ws.onclose=()=>{$('cap').textContent='servidor caído';$('cap').className='pill bad';setTimeout(connectWS,1500);};
   ws.onmessage=e=>{
     const m=JSON.parse(e.data);
-    if(m.type==='info'){$('ipadurl').textContent=m.ipad_url;$('setupurl').textContent=m.setup_url;}
+    if(m.type==='info'){
+      $('ipadurl').textContent=m.ipad_url;$('setupurl').textContent=m.setup_url;
+      $('pcname').textContent=m.name?'· '+m.name+(m.id?' ('+m.id+')':''):'';
+      $('mdns').textContent=m.mdns?'La app nativa encuentra esta PC sola por Bonjour (_ipadbridge._tcp).':'mDNS no disponible (pip install zeroconf): en la app hay que escribir la IP.';
+      $('pairoff').hidden=m.pairing!==false;
+      if(m.code){
+        code=m.code;$('code').textContent=m.code.slice(0,3)+' '+m.code.slice(3);
+        $('qr').src=m.qr_url+'?'+Date.now();$('pairbox').hidden=false;
+        $('codenote').textContent=m.pair_url||'';
+        const d=m.devices||[];
+        $('devices').innerHTML=d.length?'Emparejados ('+d.length+'):<ul>'+d.map(x=>'<li>'+(x.name||'iPad')+' · vence '+new Date(x.expires*1000).toLocaleDateString()+'</li>').join('')+'</ul>':'Ningún iPad emparejado todavía.';
+      }
+    }
     if(m.type==='status'){
       $('cap').textContent=m.capturing?'capturando':'en espera';$('cap').className='pill '+(m.capturing?'ok':'');
       $('view').textContent=m.viewers?'iPad conectado ('+m.viewers+')':'sin iPad';$('view').className='pill '+(m.viewers?'ok':'');
-      $('rate').textContent=m.capturing?m.fps+' fps · '+m.mbps+' Mbps (tope '+m.bitrate+') · '+(m.transports.join('+')||'—'):'—';
+      $('rate').textContent=m.capturing?m.fps+' fps · '+m.mbps+' Mbps (tope '+m.bitrate+') · '+(m.transports.join('+')||'—'):(m.bridge_target?'la app en '+m.bridge_target+' espera al puente':'—');
       $('target').textContent=m.target.name+' '+m.target.width+'x'+m.target.height+' @ '+m.target.hz+' Hz'+(m.target.virtual?'':' (SIN monitor virtual: espejo)');
       if(m.quality){const q=m.quality, modes={auto:'automática',draw:'mejor para dibujar',motion:'mejor para movimiento'};
         $('quality').textContent=(modes[q.mode]||q.mode)+', nivel '+q.level+(q.reason?' ('+q.reason+')':'')+': '+(q.width&&q.height?q.width+'x'+q.height+' ':'')
