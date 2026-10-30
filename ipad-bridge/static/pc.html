@@ -10,6 +10,8 @@
 <div><span id="cap" class="pill">…</span><span id="view" class="pill">…</span><span id="rate" class="pill">…</span></div>
 <p class="hint">Monitor del iPad: <b id="target">…</b><br>
 iPad: <b id="ipadurl">…</b> · primera vez: <b id="setupurl">…</b></p>
+<p class="hint">Calidad: <b id="quality">…</b><br>
+Medición del iPad (cada 5 s): <b id="stats">sin datos todavía</b></p>
 <p class="hint">No hay nada que tocar acá. La captura arranca sola cuando el iPad se conecta (página de Safari o app) y se detiene cuando se va.
 Mandá ventanas al iPad arrastrándolas hacia la izquierda o con Win+Shift+Flecha izquierda.</p>
 <script>
@@ -26,6 +28,13 @@ function connectWS(){
       $('view').textContent=m.viewers?'iPad conectado ('+m.viewers+')':'sin iPad';$('view').className='pill '+(m.viewers?'ok':'');
       $('rate').textContent=m.capturing?m.fps+' fps · '+m.mbps+' Mbps (tope '+m.bitrate+') · '+(m.transports.join('+')||'—'):'—';
       $('target').textContent=m.target.name+' '+m.target.width+'x'+m.target.height+' @ '+m.target.hz+' Hz'+(m.target.virtual?'':' (SIN monitor virtual: espejo)');
+      if(m.quality){const q=m.quality, modes={auto:'automática',draw:'mejor para dibujar',motion:'mejor para movimiento'};
+        $('quality').textContent=(modes[q.mode]||q.mode)+', nivel '+q.level+(q.reason?' ('+q.reason+')':'')+': '+(q.width&&q.height?q.width+'x'+q.height+' ':'')
+          +Math.round(q.scale*100)+' % · '+m.bitrate+' Mbps · '+q.fps+' fps · keyframes '+q.keyframes
+          +(m.input_ms&&m.input_ms.p50!==null?' · input '+m.input_ms.p50+'/'+m.input_ms.p95+' ms (p50/p95)':'');}
+      if(m.viewer_stats&&m.viewer_stats.length)
+        $('stats').textContent=m.viewer_stats.map(s=>(s.remote||'?')+' '+(s.transport||'')+': '+s.fps+' fps ('+(s.pfps!==undefined?s.pfps+' presentados, ':'')+s.mbps+' Mbps) · captura→pantalla '
+          +s.e2e50+'/'+s.e2e95+' ms'+(s.pres50!==undefined?' (presentado '+s.pres50+'/'+s.pres95+')':'')+' · rtt '+s.rtt+' ms · cola '+s.q+' · descartes '+s.drops+(s.mode?' · modo '+s.mode:'')).join(' | ');
     }
   };
 }

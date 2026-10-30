@@ -22,6 +22,9 @@ import aiohttp
 
 APP_PORT = 7777
 T_PING, T_VIDEO, T_CONFIG, T_STILL, T_STILLCLEAR, T_INPUT, T_NEEDKEY = 0, 1, 2, 3, 4, 16, 17
+T_CTRL_UP, T_CTRL_DOWN = 18, 19      # JSON de control tal cual va por el WebSocket: iPad->PC (ping, stats, quality), PC->iPad (pong)
+CTRL_UP_TYPES = {"ping", "stats", "quality", "need-key"}
+CTRL_DOWN_TYPES = {"pong"}
 
 
 def frame(t, payload):
@@ -108,6 +111,8 @@ async def run(target, ws_url, fallback_ip=None):
                             print(f"[usb] config {m['codec']} {m['width']}x{m['height']}")
                         elif m.get("type") == "still-clear":
                             writer.write(frame(T_STILLCLEAR, b""))
+                        elif m.get("type") in CTRL_DOWN_TYPES:
+                            writer.write(frame(T_CTRL_DOWN, msg.data.encode()))
                     else:
                         break
                     await writer.drain()
@@ -123,6 +128,13 @@ async def run(target, ws_url, fallback_ip=None):
                         await ws.send_str(json.dumps(m))
                     elif t == T_NEEDKEY:
                         await ws.send_str(json.dumps({"type": "need-key"}))
+                    elif t == T_CTRL_UP:                  # ping, stats, quality...: al servidor tal cual
+                        m = json.loads(body)
+                        if m.get("type") not in CTRL_UP_TYPES:
+                            continue
+                        if m.get("type") == "stats":
+                            m["transport"] = transport
+                        await ws.send_str(json.dumps(m))
 
             async def heartbeat():
                 # Sin video no circula nada: el latido detecta en segundos si la app se cerró o se relanzó.
