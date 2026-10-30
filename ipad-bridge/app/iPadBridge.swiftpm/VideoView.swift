@@ -329,7 +329,8 @@ final class TouchVideoView: UIView, UIPencilInteractionDelegate {
         if palm { return }
         let live = liveCount
         if group == nil { group = TouchGroup(t0: now, used: hold != nil) }
-        group?.maxN = max(group?.maxN ?? 0, live)
+        let prevMax = group?.maxN ?? 0            // leer antes de escribir: Swift exige acceso exclusivo a `group`
+        group?.maxN = max(prevMax, live)
         if live == 1 && hold == nil {
             let (x, y) = norm(loc)
             send(["ev": "move", "x": x, "y": y]); lastPos = (x, y)
